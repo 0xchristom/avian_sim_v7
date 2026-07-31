@@ -1,49 +1,63 @@
 use hecs::World;
-use rand_distr::Distribution; // Dodany brakujący import
+use rand_distr::Distribution;
 use avian_core::rng::SimRng;
 use avian_core::components::*;
 use crate::components::*;
 
+/// Prawidłowa formuła Gompertz-Makeham:
+/// h(x) = A * exp(B*x) + C
+/// S(x) = exp( -(A/B)*(exp(B*x) - 1) - C*x )
 pub fn sample_age(rng: &mut SimRng) -> Age {
     let u: f64 = rng.gen();
-    let target_s: f64 = 1.0 - u; // Przeżywalność S(x)
-    
-    // Numeryczna inwersja CDF dla Gompertz-Makeham: h(x) = 0.001 * exp(0.3*x) + 0.01
+    let target_s: f64 = u;
+
     let mut low: f64 = 0.5;
     let mut high: f64 = 15.0;
-    
-    for _ in 0..30 {
+
+    for _ in 0..40 {
         let mid: f64 = (low + high) / 2.0;
-        // S(x) = exp(- (A/B)*(exp(B*x) - 1) - C*x)
-        let s_mid: f64 = (-((0.001 / 0.3) * ((0.3 * mid).exp() - 1.0) - 0.01 * mid)).exp();
+        let a = 0.001;
+        let b = 0.3;
+        let c = 0.01;
+        
+        // POPRAWKA: minus przed C*x
+        let s_mid: f64 = (-(a / b) * ((b * mid).exp() - 1.0) - c * mid).exp();
+        
         if s_mid > target_s {
             low = mid;
         } else {
             high = mid;
         }
     }
-    
+
     let years: f64 = (low + high) / 2.0;
     let total_months = (years * 12.0).round() as u32;
+    
+    let initial_vitality: f64 = rng.gen_range(0.85..1.0);
+    
     Age {
         years,
         months: (total_months % 12) as u8,
-        vitality: 1.0,
+        vitality: initial_vitality,
     }
 }
 
 pub fn mass_from_age(age: &Age, rng: &mut SimRng) -> Mass {
     let base_mass = if age.years < 1.0 {
-        250.0 + (age.years - 0.5) * 130.0
+        250.0 + (age.years - 0.5).max(0.0) / 0.5 * 65.0
     } else if age.years <= 8.0 {
         315.0
     } else {
         315.0 - (age.years - 8.0) * 5.0
-    };
+    }.max(200.0);
+
+    let condition = rand_distr::Normal::new(0.0f64, 0.025f64)
+        .unwrap()
+        .sample(rng)
+        .clamp(-0.05, 0.05);
     
-    let condition = (rand_distr::Normal::new(0.0f64, 0.025f64).unwrap().sample(rng)).clamp(-0.05, 0.05);
     let current_g = base_mass * (1.0 + condition);
-    
+
     Mass {
         base_g: base_mass,
         condition_factor: condition,
@@ -64,7 +78,12 @@ pub fn spawn_agent(world: &mut World, rng: &mut SimRng, pos: nalgebra::Vector2<f
     let age = sample_age(rng);
     let mass = mass_from_age(&age, rng);
     let mass_kg = mass.current_g / 1000.0;
-    
+
+    // Wariancja inicjalizacji
+    let base_energy = 40.0 + rng.gen_range(0.0..20.0);
+    let initial_crop = rng.gen_range(0..=3);
+    let initial_gizzard = rng.gen_range(0..=2);
+
     world.spawn((
         Position(pos),
         Velocity(nalgebra::Vector2::zeros()),
@@ -73,10 +92,10 @@ pub fn spawn_agent(world: &mut World, rng: &mut SimRng, pos: nalgebra::Vector2<f
         age,
         Metabolism {
             bmr_watts: 10.5,
-            energy_kj: 50.0,
-            hunger: 0.5,
-            crop_count: 0,
-            gizzard_count: 0,
+            energy_kj: base_energy,
+            hunger: 0.0,
+            crop_count: initial_crop,
+            gizzard_count: initial_gizzard,
             crop_max: (mass.current_g / 10.0).ceil() as u32,
             last_peck_time: 0.0,
         },

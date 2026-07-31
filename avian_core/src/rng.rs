@@ -1,7 +1,7 @@
 use rand_chacha::ChaCha8Rng;
 use rand::{Rng, RngCore, SeedableRng};
 use rand::distributions::{Distribution, Standard};
-use std::ops::Range;
+use rand::distributions::uniform::{SampleUniform, SampleRange};
 
 pub struct SimRng(ChaCha8Rng);
 
@@ -10,15 +10,19 @@ impl SimRng {
         Self(ChaCha8Rng::seed_from_u64(seed))
     }
 
-    pub fn gen_range<T>(&mut self, range: Range<T>) -> T
+    /// POPRAWKA: Akceptuje Range (0..3) ORAZ RangeInclusive (0..=3)
+    pub fn gen_range<T, R>(&mut self, range: R) -> T
     where
-        T: PartialOrd + rand::distributions::uniform::SampleUniform,
-        Standard: Distribution<T>,
+        T: SampleUniform,
+        R: SampleRange<T>,
     {
         self.0.gen_range(range)
     }
 
-    pub fn sample<D: Distribution<T>, T>(&mut self, dist: D) -> T {
+    pub fn sample<D, T>(&mut self, dist: D) -> T
+    where
+        D: Distribution<T>,
+    {
         self.0.sample(dist)
     }
 
@@ -30,7 +34,6 @@ impl SimRng {
     }
 }
 
-// Implementacja RngCore, aby SimRng mogło być używane bezpośrednio w rand_distr
 impl RngCore for SimRng {
     fn next_u32(&mut self) -> u32 {
         self.0.next_u32()
