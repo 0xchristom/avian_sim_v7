@@ -53,7 +53,8 @@ pub fn spawn_agent(world: &mut World, rng: &mut SimRng, pos: nalgebra::Vector2<f
     world.spawn((
         Position(pos),
         Velocity(nalgebra::Vector2::zeros()),
-        Heading(0.0),
+        // LOSOWANY KIERUNEK POCZĄTKOWY (0 do 2*PI)
+        Heading(rng.gen_range(0.0..std::f64::consts::TAU)),
         mass,
         age,
         Metabolism {

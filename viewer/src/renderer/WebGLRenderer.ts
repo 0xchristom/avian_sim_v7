@@ -8,12 +8,20 @@ export class WebGLRenderer {
   
   constructor(canvas: HTMLCanvasElement) {
     this.scene = new THREE.Scene();
-    this.camera = new THREE.OrthographicCamera(0, 32, 0, 21, 0.1, 1000);
+    // Kamera pokazuje cały świat 32x21
+    this.camera = new THREE.OrthographicCamera(0, 32, 21, 0, 0.1, 1000);
     this.camera.position.z = 10;
     
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     this.renderer.setSize(800, 533);
+    this.renderer.setClearColor(0x1a1c25);
     
+    // Rysowanie siatki
+    const grid = new THREE.GridHelper(64, 64, 0x333333, 0x222222);
+    grid.rotation.x = Math.PI / 2;
+    grid.position.set(16, 10.5, -1);
+    this.scene.add(grid);
+
     const geometry = new THREE.CircleGeometry(0.4, 16);
     const material = new THREE.MeshBasicMaterial({ color: 0x888888 });
     this.birdMesh = new THREE.InstancedMesh(geometry, material, 1000);

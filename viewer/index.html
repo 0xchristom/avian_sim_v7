@@ -4,8 +4,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Avian Sim v7.0 PRO Viewer</title>
+    <style>
+        body { margin: 0; background: #0a0b10; color: #d4d4d4; font-family: 'Courier New', monospace; display: flex; }
+        canvas { background: #1a1c25; border: 1px solid #333; box-shadow: 0 0 20px rgba(0,255,204,0.1); }
+        .dashboard { width: 350px; background: #14161f; padding: 15px; height: 533px; overflow-y: auto; border-left: 2px solid #ff6c0c; box-sizing: border-box; }
+        .agent-card { background: #1a1c25; border: 1px solid #444; padding: 10px; margin-bottom: 10px; border-radius: 4px; }
+        .agent-card h4 { margin: 0 0 10px 0; color: #ff6c0c; border-bottom: 1px solid #444; padding-bottom: 5px; display: flex; justify-content: space-between; }
+        .stat-row { display: flex; justify-content: space-between; margin-bottom: 5px; font-size: 12px; }
+        .bar-bg { width: 100%; height: 6px; background: #333; margin-bottom: 10px; }
+        .bar-fill { height: 100%; }
+        h3 { border-bottom: 1px solid #333; padding-bottom: 5px; margin-top: 0; color: #00ffcc; }
+    </style>
 </head>
-<body style="margin: 0; background: #0a0b10; color: #d4d4d4; font-family: 'Courier New', monospace;">
+<body>
     <div id="root"></div>
     <script type="module" src="/src/index.tsx"></script>
 </body>

@@ -5,7 +5,7 @@ pub mod components;
 
 use hecs::World;
 use serde::{Serialize, Deserialize};
-use components::{Position, Heading, Metabolism};
+use components::{Position, Heading, Metabolism, Mass, Age};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct SimulationConfig {
@@ -75,14 +75,15 @@ impl Simulation {
 
     pub fn snapshot(&self) -> SimulationSnapshot {
         let mut agents = Vec::new();
-        for (_id, (pos, head, meta)) in self.world.query::<(&Position, &Heading, &Metabolism)>().iter() {
+        // Pobieramy prawdziwe komponenty: Position, Heading, Metabolism, Mass, Age
+        for (id, (pos, head, meta, mass, age)) in self.world.query::<(&Position, &Heading, &Metabolism, &Mass, &Age)>().iter() {
             agents.push(AgentSnapshot {
-                uid: "A001".to_string(),
+                uid: format!("A{:04}", id.to_bits().get() % 10000),
                 pos: [pos.0.x, pos.0.y],
                 heading: head.0,
                 vel: [0.0, 0.0],
-                mass_g: 315.0,
-                age_years: 2.0,
+                mass_g: mass.current_g, // Prawdziwa waga
+                age_years: age.years,   // Prawdziwy wiek
                 energy_kj: meta.energy_kj,
                 hunger: meta.hunger,
                 fsm_state: "SPACER".to_string(),
