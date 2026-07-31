@@ -1,3 +1,0 @@
-components::_::<impl Deserialize<'de> for components::HeadBobPhase>::deserialize::__Field
-components::_::<impl Deserialize<'de> for components::Mobility>::deserialize::__Field
-components::_::<impl Deserialize<'de> for components::Vision>::deserialize::__Field
