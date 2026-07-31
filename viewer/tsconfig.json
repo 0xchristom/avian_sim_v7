@@ -1,0 +1,15 @@
+{
+    "include":  [
+                    "src"
+                ],
+    "compilerOptions":  {
+                            "jsx":  "react",
+                            "strict":  true,
+                            "module":  "ESNext",
+                            "moduleResolution":  "node",
+                            "skipLibCheck":  true,
+                            "esModuleInterop":  true,
+                            "target":  "ES2020",
+                            "forceConsistentCasingInFileNames":  true
+                        }
+}

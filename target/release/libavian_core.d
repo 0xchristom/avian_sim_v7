@@ -1,0 +1,1 @@
+D:\Gemini\golebie\avian_sim_v7\target\release\libavian_core.rlib: D:\Gemini\golebie\avian_sim_v7\avian_core\src\components.rs D:\Gemini\golebie\avian_sim_v7\avian_core\src\lib.rs D:\Gemini\golebie\avian_sim_v7\avian_core\src\rng.rs D:\Gemini\golebie\avian_sim_v7\avian_core\src\spatial.rs D:\Gemini\golebie\avian_sim_v7\avian_core\src\time.rs

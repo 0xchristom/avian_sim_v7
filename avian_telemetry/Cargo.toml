@@ -1,0 +1,10 @@
+[package]
+name = "avian_telemetry"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+prost = { workspace = true }
+prost-types = { workspace = true }
+avian_core = { path = "../avian_core" }
+serde = { workspace = true }

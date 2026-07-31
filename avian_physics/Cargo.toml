@@ -1,0 +1,8 @@
+[package]
+name = "avian_physics"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rapier2d = { workspace = true }
+nalgebra = { workspace = true }
