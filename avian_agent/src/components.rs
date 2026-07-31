@@ -17,7 +17,6 @@ pub struct Vision {
     pub blind_rear_degrees: f64,
 }
 
-// Usunięto Serialize/Deserialize, ponieważ hecs::Entity tego nie implementuje
 #[derive(Clone, Copy, Debug)]
 pub struct HeadBob {
     pub phase: HeadBobPhase,

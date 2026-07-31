@@ -34,3 +34,12 @@ pub struct Metabolism {
     pub crop_max: u32,
     pub last_peck_time: f64,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FSMState(pub String);
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct LevyState {
+    pub remaining_dist: f64,
+    pub target_heading: f64,
+}
