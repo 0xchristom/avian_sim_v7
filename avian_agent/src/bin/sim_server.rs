@@ -1,18 +1,18 @@
 use avian_core::{Simulation, SimulationConfig};
-use avian_core::components::{Position, Heading, Velocity, Mass, Age, Metabolism};
+use avian_core::components::{Position, Heading, Velocity, Metabolism};
 use avian_agent::gerontology::spawn_agent;
 use avian_agent::metabolism::metabolism_system;
 use avian_agent::search::{next_step, SearchMode};
-use avian_core::rng::SimRng;
 use std::net::TcpListener;
 use tungstenite::accept;
-use rand::Rng;
+use std::collections::HashMap;
 
 fn main() {
     let mut sim = Simulation::new(42, SimulationConfig::default());
+    let mut levy_steps: HashMap<hecs::Entity, f64> = HashMap::new();
     
-    // Spawn 20 agentów w LOSOWYCH pozycjach na całej mapie
-    for _ in 0..20 {
+    // Spawn 30 agentów
+    for _ in 0..30 {
         let x = sim.rng.gen_range(2.0..30.0);
         let y = sim.rng.gen_range(2.0..19.0);
         spawn_agent(&mut sim.world, &mut sim.rng, nalgebra::Vector2::new(x, y));
@@ -27,31 +27,32 @@ fn main() {
         
         loop {
             sim.step();
-            
-            // Uruchamiamy system metabolizmu (spadek energii, głód)
             metabolism_system(&mut sim.world, &sim.time);
             
             let dt = sim.config.dt;
             
-            // Pętla fizyki i kognicji (Lévy Walk)
-            for (_id, (pos, head, vel, meta)) in sim.world.query::<(&mut Position, &mut Heading, &mut Velocity, &Metabolism)>().iter() {
-                // Jeśli energia krytycznie niska, ptak się zatrzymuje (REST)
+            for (id, (pos, head, vel, meta)) in sim.world.query::<(&mut Position, &mut Heading, &mut Velocity, &Metabolism)>().iter() {
                 if meta.energy_kj < 5.0 {
                     vel.0 = nalgebra::Vector2::zeros();
                 } else {
-                    // Wybieramy nowy kierunek i dystans na podstawie Lévy Walk
-                    let (dist, new_head) = next_step(SearchMode::Levy, head.0, &mut sim.rng);
-                    head.0 = new_head;
+                    let speed = 1.0;
+                    let remaining = levy_steps.entry(id).or_insert(0.0);
                     
-                    // Prędkość zależna od wylosowanego dystansu Lévy'ego
-                    let speed = 0.5 + (dist % 2.0); 
+                    // TUTAJ NAPRAWIAMY DRGANIA: Zmieniamy kierunek TYLKO gdy dystans wyczerpany
+                    if *remaining <= 0.0 {
+                        let (dist, new_head) = next_step(SearchMode::Levy, head.0, &mut sim.rng);
+                        head.0 = new_head;
+                        *remaining = dist.min(5.0); // Ograniczamy do max 5m jednorazowo
+                    } else {
+                        *remaining -= speed * dt;
+                    }
+                    
                     vel.0 = nalgebra::Vector2::new(speed * head.0.cos(), speed * head.0.sin());
                 }
                 
-                // Aktualizacja pozycji
                 pos.0 += vel.0 * dt;
                 
-                // Realistyczne odbijanie się od ścian (z zachowaniem kąta)
+                // Odbicia od ścian
                 if pos.0.x < 0.5 { pos.0.x = 0.5; head.0 = std::f64::consts::PI - head.0; }
                 if pos.0.x > 31.5 { pos.0.x = 31.5; head.0 = std::f64::consts::PI - head.0; }
                 if pos.0.y < 0.5 { pos.0.y = 0.5; head.0 = -head.0; }
@@ -64,7 +65,7 @@ fn main() {
             if websocket.send(tungstenite::Message::Text(json)).is_err() {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(33)); // ~30 FPS
+            std::thread::sleep(std::time::Duration::from_millis(16)); // ~60 FPS
         }
         println!("Frontend rozłączony. Czekam na nowe połączenie...");
     }

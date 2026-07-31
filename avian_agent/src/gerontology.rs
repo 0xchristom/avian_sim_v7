@@ -1,14 +1,29 @@
 use hecs::World;
-use rand_distr::{Distribution, Uniform};
+use rand_distr::Distribution; // Dodany brakujący import
 use avian_core::rng::SimRng;
 use avian_core::components::*;
 use crate::components::*;
 
 pub fn sample_age(rng: &mut SimRng) -> Age {
-    let uniform = Uniform::new(0.0, 1.0);
-    let u: f64 = uniform.sample(rng);
-    let x = (-1.0f64 / 0.3f64).ln() / (0.001f64 * u).ln(); 
-    let years = x.min(15.0).max(0.5);
+    let u: f64 = rng.gen();
+    let target_s: f64 = 1.0 - u; // Przeżywalność S(x)
+    
+    // Numeryczna inwersja CDF dla Gompertz-Makeham: h(x) = 0.001 * exp(0.3*x) + 0.01
+    let mut low: f64 = 0.5;
+    let mut high: f64 = 15.0;
+    
+    for _ in 0..30 {
+        let mid: f64 = (low + high) / 2.0;
+        // S(x) = exp(- (A/B)*(exp(B*x) - 1) - C*x)
+        let s_mid: f64 = (-((0.001 / 0.3) * ((0.3 * mid).exp() - 1.0) - 0.01 * mid)).exp();
+        if s_mid > target_s {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    
+    let years: f64 = (low + high) / 2.0;
     let total_months = (years * 12.0).round() as u32;
     Age {
         years,
@@ -26,7 +41,7 @@ pub fn mass_from_age(age: &Age, rng: &mut SimRng) -> Mass {
         315.0 - (age.years - 8.0) * 5.0
     };
     
-    let condition = (rand_distr::Normal::new(0.0f64, 0.025f64).unwrap().sample(rng) as f64).clamp(-0.05, 0.05);
+    let condition = (rand_distr::Normal::new(0.0f64, 0.025f64).unwrap().sample(rng)).clamp(-0.05, 0.05);
     let current_g = base_mass * (1.0 + condition);
     
     Mass {
@@ -38,7 +53,7 @@ pub fn mass_from_age(age: &Age, rng: &mut SimRng) -> Mass {
 
 pub fn vitality_update(age: &mut Age, dt: f64, rng: &mut SimRng) {
     let decay = 0.001 * (0.3 * age.years).exp() + 0.01;
-    let noise = rand_distr::Normal::new(0.0f64, 0.01f64).unwrap().sample(rng) as f64;
+    let noise = rand_distr::Normal::new(0.0f64, 0.01f64).unwrap().sample(rng);
     age.vitality += -decay * dt + noise * dt.sqrt();
     if age.vitality < 0.0 {
         age.vitality = 0.0;
@@ -53,7 +68,6 @@ pub fn spawn_agent(world: &mut World, rng: &mut SimRng, pos: nalgebra::Vector2<f
     world.spawn((
         Position(pos),
         Velocity(nalgebra::Vector2::zeros()),
-        // LOSOWANY KIERUNEK POCZĄTKOWY (0 do 2*PI)
         Heading(rng.gen_range(0.0..std::f64::consts::TAU)),
         mass,
         age,

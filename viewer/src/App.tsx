@@ -15,11 +15,7 @@ const App: React.FC = () => {
     }
     
     const ws = new WebSocket('ws://127.0.0.1:8080');
-    
-    ws.onopen = () => {
-      console.log("✅ Połączono z serwerem Rust WebSocket!");
-    };
-    
+    ws.onopen = () => console.log("✅ Połączono z serwerem Rust!");
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
@@ -28,10 +24,7 @@ const App: React.FC = () => {
         console.error("Błąd parsowania JSON:", e);
       }
     };
-
-    ws.onerror = (e) => {
-      console.error("❌ Błąd połączenia WebSocket. Czy serwer Rust działa?", e);
-    };
+    ws.onerror = () => console.error("❌ Błąd WebSocket. Czy serwer Rust działa?");
 
     return () => ws.close();
   }, [setSnapshot]);
@@ -43,9 +36,15 @@ const App: React.FC = () => {
   }, [snapshot]);
 
   return (
-    <div style={{ display: 'flex' }}>
+    <div style={{ display: 'flex', padding: '20px', gap: '20px' }}>
       <canvas ref={canvasRef} width={800} height={533} />
-      <Dashboard agents={snapshot?.agents || []} />
+      <div className="sidebar">
+        <div className="sidebar-header">
+          <h2>AVIAN SIM v7.0 PRO</h2>
+          <p>Ground Truth Telemetry | Rust Core + React Viewer</p>
+        </div>
+        <Dashboard agents={snapshot?.agents || []} />
+      </div>
     </div>
   );
 };

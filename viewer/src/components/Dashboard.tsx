@@ -11,7 +11,7 @@ interface AgentData {
 
 export const Dashboard: React.FC<{ agents: AgentData[] }> = ({ agents }) => {
   return (
-    <div className="dashboard">
+    <div>
       <h3>ZAZNACZENI AGENTSI ({agents.length})</h3>
       {agents.length === 0 && <p style={{ color: '#888' }}>Oczekiwanie na dane z silnika Rust...</p>}
       {agents.map(a => (
