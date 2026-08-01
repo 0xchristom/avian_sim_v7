@@ -1,18 +1,18 @@
-use hashbrown::HashMap;
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use hecs::Entity;
 use nalgebra::Vector2;
 
 pub struct SpatialHashGrid {
     cell_size: f64,
-    cells: HashMap<u64, SmallVec<[Entity; 8]>>,
+    cells: FxHashMap<u64, SmallVec<[Entity; 8]>>,
 }
 
 impl SpatialHashGrid {
     pub fn new(cell_size: f64) -> Self {
         Self {
             cell_size,
-            cells: HashMap::new(),
+            cells: FxHashMap::default(),
         }
     }
 
@@ -42,7 +42,7 @@ impl SpatialHashGrid {
         result
     }
 
-    pub fn query_k_nearest(&self, pos: Vector2<f64>, k: usize, positions: &HashMap<Entity, Vector2<f64>>) -> Vec<(Entity, f64)> {
+    pub fn query_k_nearest(&self, pos: Vector2<f64>, k: usize, positions: &FxHashMap<Entity, Vector2<f64>>) -> Vec<(Entity, f64)> {
         let mut candidates: Vec<(Entity, f64)> = self.query_radius(pos, 10.0)
             .into_iter()
             .filter_map(|e| {
@@ -53,7 +53,11 @@ impl SpatialHashGrid {
             })
             .collect();
 
-        candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Deterministyczne sortowanie (Ticket 3)
+        candidates.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.to_bits().get().cmp(&b.0.to_bits().get()))
+        });
         candidates.truncate(k);
         candidates
     }

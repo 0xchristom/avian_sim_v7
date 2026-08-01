@@ -1,7 +1,7 @@
 use hecs::World;
 use rand_distr::Distribution;
 use avian_core::rng::SimRng;
-use avian_core::components::{Position, Velocity, Heading, Mass, Age, Metabolism, FSMState, LevyState};
+use avian_core::components::*;
 
 pub fn sample_age(rng: &mut SimRng) -> Age {
     let u: f64 = rng.gen();
@@ -33,10 +33,13 @@ pub fn mass_from_age(age: &Age, rng: &mut SimRng) -> Mass {
     Mass { base_g: base_mass, condition_factor: condition, current_g: base_mass * (1.0 + condition) }
 }
 
-pub fn spawn_agent(world: &mut World, rng: &mut SimRng, pos: nalgebra::Vector2<f64>) -> hecs::Entity {
+pub fn spawn_agent(world: &mut World, rng: &mut SimRng, pos: nalgebra::Vector2<f64>, physics: &mut avian_physics::PhysicsWorld) -> hecs::Entity {
     let age = sample_age(rng);
     let mass = mass_from_age(&age, rng);
+    let mass_kg = mass.current_g / 1000.0;
     let crop_max = (mass.current_g / 10.0).ceil() as u32;
+    
+    let rb_handle = physics.spawn_agent_body(nalgebra::Vector2::new(pos.x as f32, pos.y as f32), mass_kg as f32);
     
     world.spawn((
         Position(pos),
@@ -53,7 +56,26 @@ pub fn spawn_agent(world: &mut World, rng: &mut SimRng, pos: nalgebra::Vector2<f
             crop_max,
             last_peck_time: 0.0,
         },
-        FSMState("SPACER".to_string()),
+        FSMState::Spacer,
         LevyState { remaining_dist: 0.0, target_heading: rng.gen_range(0.0..std::f64::consts::TAU) },
+        Mobility {
+            max_speed_ms: 1.2,
+            max_angular_speed_rads: 2.0,
+            acceleration_ms2: 10.0 * mass_kg.powf(-0.25),
+        },
+        Vision {
+            fov_degrees: 170.0,
+            fovea_resolution: 1.0,
+            blind_front_degrees: 20.0,
+            blind_rear_degrees: 30.0,
+        },
+        HeadBob {
+            phase: HeadBobPhase::Hold,
+            offset: nalgebra::Vector2::zeros(), // Naprawiona nazwa pola
+            time_in_phase: 0.0,
+            hold_duration: 0.1,
+            thrust_duration: 0.05,
+        },
+        PhysicsHandle(rb_handle),
     ))
 }

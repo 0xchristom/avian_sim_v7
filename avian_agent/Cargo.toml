@@ -9,9 +9,12 @@ nalgebra = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 avian_core = { path = "../avian_core" }
-serde_json = "1.0"
-tungstenite = "0.20"
+avian_physics = { path = "../avian_physics" }
+avian_telemetry = { path = "../avian_telemetry" }
+tungstenite = { workspace = true }
+rustc-hash = { workspace = true }
 
 [[bin]]
 name = "sim_server"

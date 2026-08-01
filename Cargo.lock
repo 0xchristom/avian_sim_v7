@@ -52,10 +52,13 @@ name = "avian_agent"
 version = "0.1.0"
 dependencies = [
  "avian_core",
+ "avian_physics",
+ "avian_telemetry",
  "hecs",
  "nalgebra",
  "rand",
  "rand_distr",
+ "rustc-hash",
  "serde",
  "serde_json",
  "tungstenite",
@@ -65,13 +68,17 @@ dependencies = [
 name = "avian_core"
 version = "0.1.0"
 dependencies = [
+ "avian_physics",
  "bincode",
  "hashbrown 0.14.5",
  "hecs",
  "nalgebra",
  "rand",
  "rand_chacha",
+ "rapier2d",
+ "rustc-hash",
  "serde",
+ "serde_json",
  "smallvec",
  "thiserror",
 ]

@@ -1,6 +1,6 @@
 use nalgebra::Vector2;
-use avian_core::components::Velocity;
-use crate::components::HeadBobPhase;
+use avian_core::components::*;
+use avian_core::components::HeadBobPhase;
 
 pub struct VaultingGait {
     pub leg_length_m: f64,

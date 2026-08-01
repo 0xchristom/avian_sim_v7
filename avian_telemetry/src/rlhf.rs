@@ -44,25 +44,11 @@ impl RLReward {
     }
 }
 
-pub fn state_to_observation(agent_pos: [f32; 2], agent_energy: f32, agent_hunger: f32, neighbors: &[[f32; 2]], grains: &[[f32; 2]]) -> RLObservation {
+pub fn state_to_observation(agent: &avian_core::AgentSnapshot) -> RLObservation {
     let mut vec = [0.0f32; 128];
-    
-    vec[0] = agent_pos[0];
-    vec[1] = agent_pos[1];
-    vec[2] = agent_energy;
-    vec[3] = agent_hunger;
-    
-    for (i, n) in neighbors.iter().take(7).enumerate() {
-        let base = 16 + i * 7;
-        vec[base] = n[0] - agent_pos[0];
-        vec[base + 1] = n[1] - agent_pos[1];
-    }
-    
-    for (i, g) in grains.iter().take(5).enumerate() {
-        let base = 65 + i * 3;
-        vec[base] = g[0] - agent_pos[0];
-        vec[base + 1] = g[1] - agent_pos[1];
-    }
-    
+    vec[0] = agent.pos[0] as f32;
+    vec[1] = agent.pos[1] as f32;
+    vec[2] = agent.energy_kj as f32;
+    vec[3] = agent.hunger as f32;
     RLObservation { vector: vec }
 }

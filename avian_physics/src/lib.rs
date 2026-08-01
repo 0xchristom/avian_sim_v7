@@ -39,6 +39,33 @@ impl PhysicsWorld {
         }
     }
 
+    pub fn add_wall(&mut self, p1: Vector2<f32>, p2: Vector2<f32>) {
+        let collider = ColliderBuilder::segment(nalgebra::Point2::new(p1.x, p1.y), nalgebra::Point2::new(p2.x, p2.y))
+            .build();
+        self.colliders.insert(collider);
+    }
+
+    pub fn spawn_agent_body(&mut self, pos: Vector2<f32>, mass: f32) -> RigidBodyHandle {
+        let rb = RigidBodyBuilder::dynamic()
+            .translation(nalgebra::Vector2::new(pos.x, pos.y))
+            .additional_mass_properties(MassProperties::new(nalgebra::Point2::new(0.0, 0.0), mass, 0.01))
+            .linear_damping(1.0)
+            .angular_damping(1.0)
+            .build();
+        
+        // Najpierw wstawiamy ciało sztywne do zestawu ciał
+        let handle = self.bodies.insert(rb);
+        
+        // Następnie tworzymy kolidery i przypisujemy je do ciała za pomocą uchwytu
+        let collider = ColliderBuilder::ball(0.4)
+            .restitution(0.2)
+            .friction(0.8)
+            .build();
+        self.colliders.insert_with_parent(collider, handle, &mut self.bodies);
+        
+        handle
+    }
+
     pub fn step(&mut self) {
         let physics_hooks = ();
         let event_handler = ();
@@ -53,29 +80,9 @@ impl PhysicsWorld {
             &mut self.impulse_joints,
             &mut self.multibody_joints,
             &mut self.ccd_solver,
-            Some(&mut self.query_pipeline), // Dodano Some()
+            Some(&mut self.query_pipeline),
             &physics_hooks,
             &event_handler,
         );
-    }
-
-    pub fn init_ellipse_collider(half_extents: Vector2<f32>) -> Collider {
-        ColliderBuilder::ball(half_extents.x.max(half_extents.y)).build()
-    }
-
-    pub fn init_head_collider(_offset: Vector2<f32>, radius: f32) -> Collider {
-        ColliderBuilder::ball(radius).build()
-    }
-
-    pub fn rigid_body_config(mass: f32, half_extents: Vector2<f32>) -> (RigidBody, Collider) {
-        let inertia = (2.0 / 5.0) * mass * (half_extents.x.powi(2) + half_extents.y.powi(2));
-        let rb = RigidBodyBuilder::dynamic()
-            .additional_mass_properties(MassProperties::new(nalgebra::Point2::new(0.0, 0.0), mass, inertia))
-            .build();
-        let collider = ColliderBuilder::ball(half_extents.x.max(half_extents.y))
-            .restitution(0.2)
-            .friction(0.8)
-            .build();
-        (rb, collider)
     }
 }

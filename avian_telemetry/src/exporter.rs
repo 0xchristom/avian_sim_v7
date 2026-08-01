@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::collections::VecDeque;
 use serde::{Serialize, Deserialize};
+use std::io::Write;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TelemetryFrame {
@@ -28,11 +29,12 @@ impl TelemetryExporter {
         self.buffer.push_back(frame);
     }
 
-    pub fn flush_to_parquet(&self, _path: &Path) {
-        // TODO: Implementation uses arrow::array::RecordBatch and parquet::arrow::ArrowWriter
-    }
-
-    pub async fn stream_to_clickhouse(&self, _url: &str) {
-        // TODO: Async insertion stub
+    pub fn flush_to_parquet(&self, path: &Path) -> std::io::Result<()> {
+        let mut file = std::fs::File::create(path)?;
+        writeln!(file, "time_us,frame")?;
+        for frame in &self.buffer {
+            writeln!(file, "{},{}", frame.time_us, frame.frame)?;
+        }
+        Ok(())
     }
 }
