@@ -274,14 +274,21 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
             flee_dir,
             sick,
             memory_target: memory_targets.get(&id).copied().flatten(),
+            // 5.2: scenario-tunable hunger threshold for the root Forage
+            // condition (defaults to the biology constant).
+            forage_hunger_threshold: sim.config.foraging_threshold,
         };
 
         let _ = tree.tick(&mut ctx);
 
         // 2.1 boids-as-force: sum steering onto the tree-selected velocity.
         // Suppressed while fleeing (a fleeing pigeon does not align with its
-        // flock) and while preening (a preening pigeon stands still).
-        if *ctx.fsm != FSMState::Fleeing && *ctx.fsm != FSMState::Preening {
+        // flock), while preening (a preening pigeon stands still), and when the
+        // 5.2 scenario disables flocking (config.flocking_enabled).
+        if sim.config.flocking_enabled
+            && *ctx.fsm != FSMState::Fleeing
+            && *ctx.fsm != FSMState::Preening
+        {
             let boid_neighbors: Vec<(Vector2<f64>, Vector2<f64>, f64)> = neighbors_raw.iter()
                 .filter_map(|(e, d)| match (positions.get(e), velocities.get(e)) {
                     (Some(p), Some(v)) if *d > 1e-6 => Some((*p, *v, *d)),
@@ -464,7 +471,12 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     if sim.config.immigration_enabled && live < calibration::MIN_POPULATION {
         let missing = calibration::MIN_POPULATION - live;
         for _ in 0..missing {
-            let pos = avian_core::Simulation::random_free_point(&sim.obstacles, &mut sim.rng);
+            let pos = avian_core::Simulation::random_free_point(
+                sim.config.world_width,
+                sim.config.world_height,
+                &sim.obstacles,
+                &mut sim.rng,
+            );
             let uid = sim.next_uid_str();
             let e = spawn_agent(&mut sim.world, &mut sim.rng, pos, &mut sim.physics, uid);
             // 7.2: energy carried in by the respawned agent.

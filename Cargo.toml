@@ -22,3 +22,4 @@ rapier2d = { version = "0.18", features = ["enhanced-determinism", "serde-serial
 rustc-hash = "1.1"
 tungstenite = "0.20"
 ctrlc = "3.4"
+toml = "0.8"

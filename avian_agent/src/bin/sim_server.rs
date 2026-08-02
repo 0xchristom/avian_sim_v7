@@ -1,4 +1,3 @@
-use avian_core::{Simulation, SimulationConfig};
 use avian_core::calibration;
 use avian_core::events::Event;
 use avian_agent::gerontology::spawn_agent;
@@ -46,11 +45,31 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| Format::from_str(s))
         .unwrap_or(Format::Csv);
+    // 5.2: base scenario from a `simulation.toml` file. CLI flags below override
+    // the file on collision (explicit command line wins over a file default).
+    let config_path = args.iter()
+        .position(|a| a == "--config")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.to_string());
 
-    let mut config = SimulationConfig::default();
-    config.urban_obstacles = urban;
-    config.weather_enabled = weather;
-    let mut sim = Simulation::new(seed, config);
+    let mut config = match &config_path {
+        Some(path) => match avian_core::SimulationConfig::from_file(path) {
+            Ok(c) => { println!("Scenario config loaded from {path}"); c }
+            Err(e) => {
+                eprintln!("Failed to read config file {path}: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => avian_core::SimulationConfig::default(),
+    };
+    // CLI overrides (win over the file).
+    config.urban_obstacles |= urban;
+    config.weather_enabled |= weather;
+    if args.iter().any(|a| a == "--seed") {
+        config.seed = Some(seed);
+    }
+
+    let mut sim = avian_core::Simulation::from_config(config.clone());
     let mut exporter = TelemetryExporter::new(usize::MAX);
 
     // 3.4: output path carries the format extension (only set with --output).
@@ -96,14 +115,20 @@ fn main() {
     let r = running.clone();
     ctrlc::set_handler(move || { r.store(false, Ordering::SeqCst); }).ok();
 
-    for _ in 0..30 {
-        let pos = avian_core::Simulation::random_free_point(&sim.obstacles, &mut sim.rng);
+    // 5.2: initial population/grains come from the scenario config.
+    for _ in 0..config.initial_agents {
+        let pos = avian_core::Simulation::random_free_point(
+            sim.config.world_width,
+            sim.config.world_height,
+            &sim.obstacles,
+            &mut sim.rng,
+        );
         let uid = sim.next_uid_str();
         spawn_agent(&mut sim.world, &mut sim.rng, pos, &mut sim.physics, uid);
     }
-    for _ in 0..15 {
-        let x = sim.rng.gen_range(2.0..30.0);
-        let y = sim.rng.gen_range(2.0..19.0);
+    for _ in 0..config.initial_grains {
+        let x = sim.rng.gen_range(2.0..sim.config.world_width - 2.0);
+        let y = sim.rng.gen_range(2.0..sim.config.world_height - 2.0);
         spawn_grain(&mut sim, nalgebra::Vector2::new(x, y), 10);
     }
 
@@ -117,6 +142,10 @@ fn main() {
                 }
             }
         }
+    }
+    // 5.2: the toml `event_schedule` injects at frame 0, same semantics.
+    for ev in &config.event_schedule {
+        sim.inject_event(ev.clone());
     }
 
     // Fix #3: Headless mode — run simulation without any client
@@ -221,7 +250,10 @@ fn main() {
             clients.remove(*i);
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(16));
+        // 5.2: interactive pacing = 16 ms real time / time_scale (1× ≈ 60fps).
+        std::thread::sleep(std::time::Duration::from_secs_f64(
+            16.0 / 1000.0 / sim.config.time_scale,
+        ));
     }
 
     println!("Shutting down. {} telemetry frames written to {}", exporter.frame_count(), out_path.as_deref().unwrap_or("(no telemetry file)"));

@@ -68,6 +68,10 @@ pub struct AgentContext<'a> {
     // computed in run_systems before the tick. Used only when no grain is
     // visible (memory-biased search feeds the existing Forage condition).
     pub memory_target: Option<Vector2<f64>>,
+    // 5.2: scenario-tunable hunger threshold for the root Forage condition.
+    // `run_systems` fills it from `SimulationConfig::foraging_threshold`
+    // (default = the biology constant FORAGING_HUNGER_THRESHOLD).
+    pub forage_hunger_threshold: f64,
 }
 
 #[derive(Debug)]
@@ -252,7 +256,9 @@ fn foraging_action(ctx: &mut AgentContext) -> BTStatus {
     // 2.0c: condition is exactly "hungry AND (grain visible OR remembered food
     // exists)". 4.2 plugs memory-biased target selection in here. With no
     // target, this returns Failure so the root falls through to Wander.
-    if ctx.meta.hunger < calibration::FORAGING_HUNGER_THRESHOLD {
+    // 5.2: the hunger threshold is scenario-tunable (config), defaulting to the
+    // biology constant — see AgentContext::forage_hunger_threshold.
+    if ctx.meta.hunger < ctx.forage_hunger_threshold {
         return BTStatus::Failure;
     }
     match pick_forage_target(ctx) {

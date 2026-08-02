@@ -133,10 +133,10 @@ pub fn plan_movement(sim: &mut Simulation, positions: &FxHashMap<Entity, Vector2
             _ => {
                 // Patrol mode: waypoint, re-randomize once reached. 4.3: sample
                 // obstacle-free points so the hawk never patrols INTO a building.
-                let target = patrol_target.unwrap_or_else(|| random_patrol_target(&mut sim.rng, &sim.obstacles));
+                let target = patrol_target.unwrap_or_else(|| random_patrol_target(&mut sim.rng, sim.config.world_width, sim.config.world_height, &sim.obstacles));
                 let dir = target - ppos;
                 if dir.norm() < 1.0 {
-                    new_patrol = Some(random_patrol_target(&mut sim.rng, &sim.obstacles));
+                    new_patrol = Some(random_patrol_target(&mut sim.rng, sim.config.world_width, sim.config.world_height, &sim.obstacles));
                 }
                 if dir.norm() > 1e-6 {
                     dir / dir.norm() * pred_speed
@@ -160,21 +160,21 @@ pub fn plan_movement(sim: &mut Simulation, positions: &FxHashMap<Entity, Vector2
     updates.into_iter().map(|(id, v, _)| (id, v)).collect()
 }
 
-fn random_patrol_target(rng: &mut SimRng, obstacles: &[avian_core::components::Obstacle]) -> Vector2<f64> {
-    avian_core::Simulation::random_free_point(obstacles, rng)
+fn random_patrol_target(rng: &mut SimRng, w: f64, h: f64, obstacles: &[avian_core::components::Obstacle]) -> Vector2<f64> {
+    avian_core::Simulation::random_free_point(w, h, obstacles, rng)
 }
 
 /// A patrol waypoint at least `PREDATOR_REPOSITION_MIN_DIST` away from `pos`,
 /// so a hawk that just struck sweeps into a NEW area instead of re-pinning the
 /// same cluster.
-fn far_random_point(rng: &mut SimRng, pos: Vector2<f64>, obstacles: &[avian_core::components::Obstacle]) -> Vector2<f64> {
+fn far_random_point(rng: &mut SimRng, pos: Vector2<f64>, w: f64, h: f64, obstacles: &[avian_core::components::Obstacle]) -> Vector2<f64> {
     for _ in 0..16 {
-        let p = random_patrol_target(rng, obstacles);
+        let p = random_patrol_target(rng, w, h, obstacles);
         if (p - pos).norm() >= calibration::PREDATOR_REPOSITION_MIN_DIST_M {
             return p;
         }
     }
-    random_patrol_target(rng, obstacles)
+    random_patrol_target(rng, w, h, obstacles)
 }
 
 /// Contact resolution: after position sync, roll capture for each predator/
@@ -206,7 +206,7 @@ pub fn resolve_contact(sim: &mut Simulation, positions: &FxHashMap<Entity, Vecto
                     // stop chasing while repositioning, so the predator RANGES
                     // the map instead of pinning one local cluster.
                     if let Ok(mut pr) = sim.world.get::<&mut Predator>(*pid) {
-                        pr.patrol_target = Some(far_random_point(&mut sim.rng, *ppos, &sim.obstacles));
+                        pr.patrol_target = Some(far_random_point(&mut sim.rng, *ppos, sim.config.world_width, sim.config.world_height, &sim.obstacles));
                         pr.capture_cooldown = calibration::PREDATOR_REPOSITION_COOLDOWN_FRAMES;
                     }
                 } else if let Ok(mut pr) = sim.world.get::<&mut Predator>(*pid) {

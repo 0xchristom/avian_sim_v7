@@ -313,7 +313,7 @@ pub fn build_checkpoint(sim: &crate::Simulation) -> Result<Checkpoint, Box<dyn s
     let world_bytes = serialize_world(&sim.world)?;
     Ok(Checkpoint {
         version: CHECKPOINT_VERSION,
-        config: sim.config,
+        config: sim.config.clone(),
         rng: sim.rng.clone(),
         time: sim.time,
         environment: sim.environment,

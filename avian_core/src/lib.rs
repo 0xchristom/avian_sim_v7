@@ -13,7 +13,8 @@ use events::Event;
 use avian_physics::PhysicsWorld;
 use nalgebra::Vector2;
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SimulationConfig {
     pub dt: f64,
     pub gravity: f64,
@@ -38,6 +39,43 @@ pub struct SimulationConfig {
     /// and their exact trajectories. Weather can still be forced per-run via
     /// the `SetWeather` event regardless of this flag.
     pub weather_enabled: bool,
+    // ---- 5.2 scenario params (simulation.toml). All default to the current
+    // fixed behavior so an empty file == SimulationConfig::default(). ----
+    /// 5.2: run seed. `None` → the caller's explicit `Simulation::new(seed, ..)`
+    /// seed wins (or `Simulation::from_config` falls back to 42).
+    pub seed: Option<u64>,
+    /// 5.2: arena size in meters. The four walls are built at these bounds.
+    pub world_width: f64,
+    pub world_height: f64,
+    /// 5.2: initial population/grains spawned by the server at startup.
+    pub initial_agents: usize,
+    pub initial_grains: usize,
+    /// 5.2: real-time pacing multiplier for the interactive server (1× = 60fps
+    /// pacing). Ignored in headless mode, where frames are the unit.
+    pub time_scale: f64,
+    /// 5.2: hunger threshold that flips the root Forage condition. Scenario-
+    /// tunable; the biology constant FORAGING_HUNGER_THRESHOLD is the default.
+    pub foraging_threshold: f64,
+    /// 5.2: when false, boids steering is suppressed entirely (agents move by
+    /// the behavior tree alone — the plan's per-run scenario experiment).
+    pub flocking_enabled: bool,
+    /// 5.2: explicit obstacle layout (overrides the `urban_obstacles` default
+    /// map when non-empty). Scenario geometry, separate from the compile-time
+    /// biology constants.
+    pub obstacles: Vec<ObstacleSpec>,
+    /// 5.2: pre-recorded scenario events, injected at frame 0 (same semantics
+    /// as the server's `--events-file`).
+    pub event_schedule: Vec<Event>,
+}
+
+/// 5.2: a scenario obstacle in toml-space. Same box semantics as the runtime
+/// `Obstacle` (min..=max), but without the derived `id` — `Simulation::new`
+/// assigns ids in order when it materializes the layout.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ObstacleSpec {
+    pub kind: ObstacleKind,
+    pub min: [f64; 2],
+    pub max: [f64; 2],
 }
 
 impl Default for SimulationConfig {
@@ -50,7 +88,32 @@ impl Default for SimulationConfig {
             immigration_enabled: true,
             urban_obstacles: false,
             weather_enabled: false,
+            seed: None,
+            world_width: calibration::WORLD_WIDTH_M,
+            world_height: calibration::WORLD_HEIGHT_M,
+            initial_agents: 30,
+            initial_grains: 15,
+            time_scale: 1.0,
+            foraging_threshold: calibration::FORAGING_HUNGER_THRESHOLD,
+            flocking_enabled: true,
+            obstacles: Vec::new(),
+            event_schedule: Vec::new(),
         }
+    }
+}
+
+impl SimulationConfig {
+    /// 5.2: read a `simulation.toml` file. Any field the file omits falls back
+    /// to the compiled default — biology constants stay in `calibration.rs`,
+    /// only scenario params belong in the file (see DEVELOPMENT_PLAN §5.2).
+    pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let s = std::fs::read_to_string(path)?;
+        Ok(toml::from_str(&s)?)
+    }
+
+    /// 5.2: serialize back to toml (used to round-trip a written file).
+    pub fn to_toml_string(&self) -> Result<String, toml::ser::Error> {
+        toml::to_string(self)
     }
 }
 
@@ -133,12 +196,15 @@ pub struct Simulation {
 }
 
 impl Simulation {
+    /// Build an empty-arena simulation. `seed` is the explicit per-run seed;
+    /// `config.seed` (if any) is ignored here — see `from_config`.
     pub fn new(seed: u64, config: SimulationConfig) -> Self {
+        let (w, h) = (config.world_width as f32, config.world_height as f32);
         let mut physics = PhysicsWorld::new();
-        physics.add_wall(nalgebra::Vector2::new(0.0, 0.0), nalgebra::Vector2::new(32.0, 0.0));
-        physics.add_wall(nalgebra::Vector2::new(32.0, 0.0), nalgebra::Vector2::new(32.0, 21.0));
-        physics.add_wall(nalgebra::Vector2::new(32.0, 21.0), nalgebra::Vector2::new(0.0, 21.0));
-        physics.add_wall(nalgebra::Vector2::new(0.0, 21.0), nalgebra::Vector2::new(0.0, 0.0));
+        physics.add_wall(nalgebra::Vector2::new(0.0, 0.0), nalgebra::Vector2::new(w, 0.0));
+        physics.add_wall(nalgebra::Vector2::new(w, 0.0), nalgebra::Vector2::new(w, h));
+        physics.add_wall(nalgebra::Vector2::new(w, h), nalgebra::Vector2::new(0.0, h));
+        physics.add_wall(nalgebra::Vector2::new(0.0, h), nalgebra::Vector2::new(0.0, 0.0));
 
         let mut sim = Self {
             world: World::new(),
@@ -159,12 +225,28 @@ impl Simulation {
             total_energy_lost_at_death_kj: 0.0,
             total_energy_inflow_spawn_kj: 0.0,
         };
+        // 5.2: an explicit scenario layout beats the built-in default map.
+        let custom_specs = sim.config.obstacles.clone();
+        if !custom_specs.is_empty() {
+            for spec in &custom_specs {
+                sim.add_obstacle(
+                    spec.kind,
+                    nalgebra::Vector2::new(spec.min[0], spec.min[1]),
+                    nalgebra::Vector2::new(spec.max[0], spec.max[1]),
+                );
+            }
         // 4.3: opt-in default urban map (kept off by default so existing
         // deterministic test scenarios keep their exact trajectories).
-        if sim.config.urban_obstacles {
+        } else if sim.config.urban_obstacles {
             sim.build_default_obstacles();
         }
         sim
+    }
+
+    /// 5.2: construct from a toml-loaded `SimulationConfig`, using its `seed`
+    /// field (falling back to 42 when absent).
+    pub fn from_config(config: SimulationConfig) -> Self {
+        Self::new(config.seed.unwrap_or(42), config)
     }
 
     /// 4.3: register a static box obstacle (collider + data). Returns its id.
@@ -196,13 +278,18 @@ impl Simulation {
             .any(|o| p.x >= o.min.x && p.x <= o.max.x && p.y >= o.min.y && p.y <= o.max.y)
     }
 
-    /// 4.3: a random point in the interior of the 32×21 arena that is NOT
+    /// 4.3/5.2: a random point in the interior of the `w × h` arena that is NOT
     /// inside any obstacle. Samples up to `MAX_FREE_POINT_TRIES` candidates
     /// before giving up and returning the last (non-obstructed) draw.
-    pub fn random_free_point(obstacles: &[Obstacle], rng: &mut rng::SimRng) -> Vector2<f64> {
+    pub fn random_free_point(
+        w: f64,
+        h: f64,
+        obstacles: &[Obstacle],
+        rng: &mut rng::SimRng,
+    ) -> Vector2<f64> {
         let mut p = Vector2::new(0.0, 0.0);
         for _ in 0..calibration::MAX_FREE_POINT_TRIES {
-            p = Vector2::new(rng.gen_range(2.0..30.0), rng.gen_range(2.0..19.0));
+            p = Vector2::new(rng.gen_range(2.0..w - 2.0), rng.gen_range(2.0..h - 2.0));
             if !Self::point_in_obstacles(obstacles, p) {
                 return p;
             }

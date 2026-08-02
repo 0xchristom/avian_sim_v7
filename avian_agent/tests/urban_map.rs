@@ -50,7 +50,12 @@ fn random_free_point_avoids_obstacles() {
     let mut sim = Simulation::new(7, config);
 
     for _ in 0..200 {
-        let p = Simulation::random_free_point(&sim.obstacles, &mut sim.rng);
+        let p = Simulation::random_free_point(
+            sim.config.world_width,
+            sim.config.world_height,
+            &sim.obstacles,
+            &mut sim.rng,
+        );
         assert!(
             !Simulation::point_in_obstacles(&sim.obstacles, p),
             "free point {p:?} landed inside an obstacle"

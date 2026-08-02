@@ -1,0 +1,52 @@
+# simulation.toml — 5.2 scenario params (runtime-tunable per run).
+#
+# Rule (DEVELOPMENT_PLAN §5.2): this file carries SCENARIO params only.
+# Biology constants (BMR, mass curve, speeds, vision FOV, energy-per-grain,
+# vitality model, boids weights) live in avian_core/src/calibration.rs and
+# are NOT overridable here. Any field omitted below falls back to the
+# compiled default. Overlap with CLI flags: the command line wins.
+
+# Run seed (None → server --seed, else 42).
+# seed = 42
+
+# Arena size in meters; the four boundary walls are built here.
+world_width = 32.0
+world_height = 21.0
+
+# Initial population / grains spawned by the server at startup.
+initial_agents = 30
+initial_grains = 15
+
+# Integration timestep (s) and real-time pacing for the interactive server.
+# dt = 0.008333333333333333
+# time_scale = 1.0
+
+# Hunger threshold that flips the root Forage condition (default = the
+# biology constant FORAGING_HUNGER_THRESHOLD).
+# foraging_threshold = 0.4
+
+# Flock steering toggle — false = agents move by the behavior tree alone.
+# flocking_enabled = true
+
+# Scenario feature flags.
+# predator_expiry = true
+# immigration_enabled = true
+# urban_obstacles = false
+# weather_enabled = false
+
+# Explicit obstacle layout (replaces the built-in urban map when non-empty).
+# kind = "Building" | "Wall" | "Water" | "Tree"
+# [[obstacles]]
+# kind = "Building"
+# min = [6.0, 3.0]
+# max = [10.0, 7.0]
+
+# Pre-recorded scenario events, injected at frame 0 (same as --events-file).
+# [[event_schedule]]
+# event = "spawn_grain"
+# pos = [5.0, 5.0]
+# count = 10
+
+# [[event_schedule]]
+# event = "set_weather"
+# weather = "Rain"
