@@ -114,11 +114,12 @@ impl BTNode for Condition {
 fn flee_action(ctx: &mut AgentContext) -> BTStatus {
     if !ctx.fleeing { return BTStatus::Failure; }
     *ctx.fsm = FSMState::Fleeing;
-    // v1 fleeing (2.2): explicit "ground sprint away at max_speed_ms".
-    // Real flight arrives in 4.1; this v1 is NOT calibrated ground truth.
+    // 4.1 flight: pigeons flee by FLYING at FLY_SPEED_MS, not a ground sprint
+    // (v1 2.2 was an explicit "ground sprint at max_speed_ms" placeholder).
+    // The flight metabolic cost is paid via FLIGHT_MR_MULTIPLIER (metabolism).
     let dir = ctx.flee_dir;
     if dir.norm() > 1e-6 {
-        let speed = ctx.mobility.max_speed_ms;
+        let speed = calibration::FLY_SPEED_MS;
         ctx.head.0 = dir.y.atan2(dir.x);
         ctx.vel.0 = dir * speed;
     } else {

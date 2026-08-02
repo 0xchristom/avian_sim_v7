@@ -115,9 +115,11 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         }
 
         // Energy drain (inline mirror of metabolism_system, with night factor).
+        // 4.1: same FLIGHT_MR_MULTIPLIER helper as metabolism_system so the
+        // 7.2 energy-balance accounting stays exact across the two drains.
         let mass_kg = mass.current_g / 1000.0;
         let v_mag = vel.0.norm();
-        let bmr_kj_s = meta.bmr_watts / 1000.0;
+        let bmr_kj_s = meta.bmr_watts * calibration::flight_mr_multiplier(v_mag) / 1000.0;
         let cot_kj_s = 12.5 * mass_kg * v_mag / 1000.0;
         let night_factor = if sim.environment.light_level < calibration::NIGHT_REST_LIGHT_THRESHOLD {
             calibration::NIGHT_DRAIN_FACTOR

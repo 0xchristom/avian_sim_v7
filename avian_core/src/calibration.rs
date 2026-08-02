@@ -23,6 +23,23 @@ pub const WALK_SPEED_MS: f64 = 1.2;
 /// Flight speed (m/s). Literature: 10-20 m/s. Used by 4.1 flight sprint.
 pub const FLY_SPEED_MS: f64 = 15.0;
 
+/// Flight metabolic-rate multiplier over BMR (4.1). Real pigeon flight costs
+/// ≈ 6-8× resting metabolism (a 315 g pigeon at ~20-25 W vs ~4 W BMR). Applied
+/// while the agent is airborne (speed above `FLIGHT_SPEED_THRESHOLD_MS`).
+pub const FLIGHT_MR_MULTIPLIER: f64 = 7.0;
+/// Speed (m/s) above which the agent is treated as flying — gates the flight
+/// metabolic cost. Midway between walk (1.2) and fly (15.0): a sick pigeon
+/// fleeing at half flight speed (7.5) still counts as flying.
+pub const FLIGHT_SPEED_THRESHOLD_MS: f64 = 5.0;
+
+/// Daily energy requirement (kJ) for a 315 g adult (4.1). Literature: 100-200 kJ.
+pub const DAILY_ENERGY_REQUIREMENT_KJ: f64 = 150.0;
+
+/// Binocular overlap (deg) in front of the head (4.1). Pigeons have ~25° of
+/// forward binocular overlap for depth perception; the monocular fields cover
+/// ~340° total (VISION_FOV_DEGREES). Refines the `Vision` blind-spot layout.
+pub const BINOCULAR_OVERLAP_DEGREES: f64 = 25.0;
+
 /// Total horizontal field of view (deg) — pigeons are ~340° monocular with a
 /// rear blind spot (4.1). Phase 1 used 170° (only one eye's field), which
 /// starved predator detection (2.2): a hawk chasing from behind was invisible.
@@ -60,6 +77,18 @@ pub fn vitality_at(t_years: f64) -> f64 {
 /// BMR (W) scaled to a body mass (g). Clamped so hatchlings never hit zero.
 pub fn bmr_for_mass(mass_g: f64) -> f64 {
     ADULT_BMR_WATTS * (mass_g / ADULT_MASS_G).clamp(0.1, 1.0)
+}
+
+/// Flight metabolic multiplier for a given speed (4.1): `FLIGHT_MR_MULTIPLIER`
+/// while airborne (`v_mag >= FLIGHT_SPEED_THRESHOLD_MS`), else 1.0 (ground).
+/// Applied to BMR in both the energy-balance drain sites (`metabolism_system`
+/// and its inline mirror in `run_systems`) so conservation stays exact.
+pub fn flight_mr_multiplier(v_mag: f64) -> f64 {
+    if v_mag >= FLIGHT_SPEED_THRESHOLD_MS {
+        FLIGHT_MR_MULTIPLIER
+    } else {
+        1.0
+    }
 }
 
 /// Critical-energy forage threshold (kJ) — 2.0 CriticalEnergy: below this the
@@ -112,8 +141,17 @@ pub const BOID_SEPARATION_RADIUS_M: f64 = 0.5;
 /// Local flock neighborhood radius (m).
 pub const BOID_NEIGHBOR_RADIUS_M: f64 = 3.0;
 
-/// Predator speed multiplier over pigeon walk speed (2.2).
+/// Predator speed multiplier over pigeon walk speed (2.2). Kept for the
+/// v1 ground-sprint era; 4.1 recalibrates the predator's absolute speed via
+/// `PREDATOR_SPEED_MS` so it can catch a fleeing (now flying) pigeon.
 pub const PREDATOR_SPEED_MULTIPLIER: f64 = 2.5;
+/// Predator absolute speed (m/s) — 4.1 v2 recalibration. Pigeons now flee by
+/// flying at `FLY_SPEED_MS` (15); a sick pigeon flees at half that (7.5).
+/// `PREDATOR_SPEED_MS = 10` sits between the two: healthy pigeons that detect
+/// the hawk early escape (flee_success is real), while sick pigeons — and any
+/// pigeon caught in the rear blind spot — are run down, matching the 2.7
+/// "sick captured first" acceptance.
+pub const PREDATOR_SPEED_MS: f64 = 10.0;
 /// Predator detection radius (m) — agents inside this + FOV enter Fleeing.
 pub const PREDATOR_DETECTION_RADIUS_M: f64 = 8.0;
 /// Contact distance (m) at which capture is rolled. This is a center-to-center
@@ -193,6 +231,31 @@ mod tests {
         assert!(WALK_SPEED_MS >= 0.5 && WALK_SPEED_MS <= 1.5, "walk speed out of range");
         assert!(FLY_SPEED_MS >= 10.0 && FLY_SPEED_MS <= 20.0, "flight speed out of range");
         assert!(WALK_SPEED_MS < FLY_SPEED_MS);
+        assert!(FLIGHT_MR_MULTIPLIER > 1.0, "flight must cost more than rest");
+        assert!(FLIGHT_MR_MULTIPLIER >= 5.0 && FLIGHT_MR_MULTIPLIER <= 9.0, "flight MR 6-8x literature");
+        // Flight threshold between walk and half-sick-flee (7.5) so a fleeing
+        // pigeon — healthy (15) or sick (7.5) — always pays the flight cost.
+        assert!(FLIGHT_SPEED_THRESHOLD_MS < FLY_SPEED_MS * 0.5);
+        assert!(FLIGHT_SPEED_THRESHOLD_MS > WALK_SPEED_MS);
+        assert_eq!(flight_mr_multiplier(WALK_SPEED_MS), 1.0, "walking must not pay flight cost");
+        assert_eq!(flight_mr_multiplier(FLY_SPEED_MS), FLIGHT_MR_MULTIPLIER);
+        assert_eq!(flight_mr_multiplier(FLY_SPEED_MS * 0.5), FLIGHT_MR_MULTIPLIER,
+            "sick half-speed flee still counts as flying");
+    }
+
+    #[test]
+    fn test_energy_requirements() {
+        assert!(
+            (100.0..=200.0).contains(&DAILY_ENERGY_REQUIREMENT_KJ),
+            "daily requirement outside literature 100-200 kJ"
+        );
+    }
+
+    #[test]
+    fn test_vision_refinements() {
+        // Binocular overlap ~25 deg in front; FOV must swallow it comfortably.
+        assert!((15.0..=35.0).contains(&BINOCULAR_OVERLAP_DEGREES));
+        assert!(BINOCULAR_OVERLAP_DEGREES < VISION_FOV_DEGREES);
     }
 
     #[test]
@@ -226,6 +289,11 @@ mod tests {
         assert!(BOID_SEPARATION_WEIGHT > BOID_ALIGNMENT_WEIGHT);
         assert!(BOID_ALIGNMENT_WEIGHT > BOID_COHESION_WEIGHT);
         assert!(PREDATOR_SPEED_MULTIPLIER > 2.0);
+        // 4.1 v2: predator must be able to run down a sick pigeon (half flight
+        // speed = 7.5) but NOT outrun a healthy pigeon that detects it early
+        // (full flight = 15) — otherwise fleeing is pointless.
+        assert!(PREDATOR_SPEED_MS > FLY_SPEED_MS * 0.5);
+        assert!(PREDATOR_SPEED_MS < FLY_SPEED_MS);
         assert!(PREDATOR_DETECTION_RADIUS_M >= PREDATOR_CONTACT_DISTANCE_M);
         assert!(PREDATOR_CONTACT_DISTANCE_M >= 0.8);
         assert!(PREDATOR_REPOSITION_MIN_DIST_M > PREDATOR_DETECTION_RADIUS_M);

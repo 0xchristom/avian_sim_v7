@@ -1,10 +1,11 @@
 //! Predator entity + fleeing (2.2).
 //!
 //! The predator is a **bespoke pursuit script, NOT a BTNode** — a single
-//! always-on chase does not need the full Selector/Sequence tree. Flight vs
-//! ground sprint is explicit: v1 fleeing is a "ground sprint away at
-//! max_speed_ms", pending real flight in 4.1. It is NOT calibrated ground
-//! truth; the v2 (post-4.1) acceptance criterion uses flight speed.
+//! always-on chase does not need the full Selector/Sequence tree. 4.1 ships
+//! flight: fleeing pigeons fly away at `FLY_SPEED_MS`, and the predator's
+//! speed (`PREDATOR_SPEED_MS`) is calibrated between a sick pigeon's half-speed
+//! flight (7.5) and a healthy pigeon's full flight (15) so healthy pigeons can
+//! genuinely escape while sick/surprised pigeons are run down.
 //!
 //! Flow per tick (called from `run_systems`):
 //! 1. `collect_threats` — detection pass BEFORE the agent loop: which agents
@@ -76,7 +77,10 @@ pub fn collect_threats(sim: &Simulation) -> FxHashMap<Entity, Vector2<f64>> {
 /// Applied to physics bodies BEFORE `physics.step` so the predator integrates
 /// with the same solver step as everyone else.
 pub fn plan_movement(sim: &mut Simulation, positions: &FxHashMap<Entity, Vector2<f64>>) -> Vec<(Entity, Vector2<f64>)> {
-    let pred_speed = calibration::PREDATOR_SPEED_MULTIPLIER * calibration::WALK_SPEED_MS;
+    // 4.1 v2: pigeons flee by flying at FLY_SPEED_MS; the predator's absolute
+    // speed is recalibrated to sit between a sick pigeon's half-speed flight
+    // (7.5) and a healthy pigeon's full flight (15) — see PREDATOR_SPEED_MS.
+    let pred_speed = calibration::PREDATOR_SPEED_MS;
 
     // Snapshot predator state so we can touch `sim.rng` while planning.
     let predators_data: Vec<(Entity, Vector2<f64>, u32, Option<Vector2<f64>>)> = sim
