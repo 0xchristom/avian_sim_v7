@@ -20,11 +20,12 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(0); // 0 = unlimited
+    // Telemetry file output is opt-in via `--output <path>`. Without it the
+    // server runs without writing any dataset, so it never grows a dataset.csv.
     let output_path = args.iter()
         .position(|a| a == "--output")
         .and_then(|i| args.get(i + 1))
-        .map(|s| s.as_str())
-        .unwrap_or("dataset.csv");
+        .map(|s| s.to_string());
     let events_file = args.iter()
         .position(|a| a == "--events-file")
         .and_then(|i| args.get(i + 1))
@@ -39,20 +40,25 @@ fn main() {
     let mut sim = Simulation::new(42, SimulationConfig::default());
     let mut exporter = TelemetryExporter::new(usize::MAX);
 
-    // 3.4: output path carries the format extension (default `dataset.csv`).
+    // 3.4: output path carries the format extension (only set with --output).
     let ext = format.extension();
-    let out_path = if output_path.ends_with(".csv") || output_path.ends_with(".jsonl") {
-        let trimmed = output_path.trim_end_matches(".csv").trim_end_matches(".jsonl");
-        format!("{trimmed}.{ext}")
-    } else {
-        output_path.to_string()
-    };
+    let out_path = output_path.as_deref().map(|op| {
+        if op.ends_with(".csv") || op.ends_with(".jsonl") {
+            let trimmed = op.trim_end_matches(".csv").trim_end_matches(".jsonl");
+            format!("{trimmed}.{ext}")
+        } else {
+            op.to_string()
+        }
+    });
 
-    // Fix #8: Open telemetry file at startup — stream to disk, no data loss
-    exporter.open_with_format(std::path::Path::new(&out_path), format).expect("Failed to open telemetry file");
-    // 2.5: side-car event log for ground-truth annotations.
-    let events_out = out_path.replace(&format!(".{ext}"), ".events.jsonl");
-    exporter.open_event_log(std::path::Path::new(&events_out)).ok();
+    // Telemetry file is only opened when --output is supplied.
+    if let Some(out) = &out_path {
+        // Fix #8: Open telemetry file at startup — stream to disk, no data loss
+        exporter.open_with_format(std::path::Path::new(out), format).expect("Failed to open telemetry file");
+        // 2.5: side-car event log for ground-truth annotations.
+        let events_out = out.replace(&format!(".{ext}"), ".events.jsonl");
+        exporter.open_event_log(std::path::Path::new(&events_out)).ok();
+    }
 
     // 3.7: dataset metadata (schema authority) written up front; reward stats
     // and sim_frames are patched in at end of run.
@@ -68,8 +74,10 @@ fn main() {
         0,
         None,
     );
-    let meta_path = out_path.replace(&format!(".{ext}"), ".metadata.json");
-    let _ = write_metadata(std::path::Path::new(&meta_path), &metadata);
+    let meta_path = out_path.as_deref().map(|out| out.replace(&format!(".{ext}"), ".metadata.json"));
+    if let Some(mp) = &meta_path {
+        let _ = write_metadata(std::path::Path::new(mp), &metadata);
+    }
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -103,7 +111,7 @@ fn main() {
     if headless {
         println!("Headless mode: running {} frames, output to {}",
             if frames_target == 0 { "unlimited".to_string() } else { frames_target.to_string() },
-            output_path);
+            out_path.as_deref().unwrap_or("(no telemetry file)"));
         let mut frame: u64 = 0;
         while running.load(Ordering::SeqCst) {
             if frames_target > 0 && frame >= frames_target { break; }
@@ -115,12 +123,14 @@ fn main() {
             }
         }
         println!("Headless run complete. {} frames, {} telemetry frames written to {}",
-            frame, exporter.frame_count(), out_path);
+            frame, exporter.frame_count(), out_path.as_deref().unwrap_or("(no telemetry file)"));
         // 3.4/3.7: flush pending `next_fsm` frames + finalize metadata.
         exporter.finish();
         metadata.sim_frames = frame;
         metadata.reward_stats = exporter.reward_stats();
-        let _ = write_metadata(std::path::Path::new(&meta_path), &metadata);
+        if let Some(mp) = &meta_path {
+            let _ = write_metadata(std::path::Path::new(mp), &metadata);
+        }
         return;
     }
 
@@ -200,9 +210,11 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_millis(16));
     }
 
-    println!("Shutting down. {} telemetry frames written to {}", exporter.frame_count(), out_path);
+    println!("Shutting down. {} telemetry frames written to {}", exporter.frame_count(), out_path.as_deref().unwrap_or("(no telemetry file)"));
     exporter.finish();
     metadata.sim_frames = 0;
     metadata.reward_stats = exporter.reward_stats();
-    let _ = write_metadata(std::path::Path::new(&meta_path), &metadata);
+    if let Some(mp) = &meta_path {
+        let _ = write_metadata(std::path::Path::new(mp), &metadata);
+    }
 }

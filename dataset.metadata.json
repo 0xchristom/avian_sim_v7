@@ -73,7 +73,16 @@
   ],
   "sim_frames": 0,
   "events_injected": [],
-  "reward_stats": null,
+  "reward_stats": {
+    "total_mean": 0.001922444011467257,
+    "total_min": -9.999166488647461,
+    "total_max": 1.5008333921432495,
+    "grain_total": 218.0,
+    "flocking_total": 1851.1018407879164,
+    "starvation_total": 0.0,
+    "captured_total": -100.0,
+    "flee_success_total": 2359.5
+  },
   "rust_version": "unknown",
   "commit": "3d93777"
 }

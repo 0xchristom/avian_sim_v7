@@ -21,3 +21,9 @@ Thumbs.db
 # Telemetry
 *.parquet
 *.arrow
+
+# Development plan
+DEVELOPMENT_PLAN.md
+
+# dataset
+dataset.csv
