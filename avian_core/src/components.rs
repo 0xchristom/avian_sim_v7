@@ -178,3 +178,26 @@ pub struct Alarm(pub bool);
 /// +0.5 flee-success reward.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AlarmPrev(pub bool);
+
+/// 4.3: obstacle classification for the urban map. Visual distinction only —
+/// all obstacle kinds share the same static-box physics (block movement) and
+/// the same ray-cast line-of-sight occlusion (block vision).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ObstacleKind {
+    Building,
+    Wall,
+    Water,
+    Tree,
+}
+
+/// 4.3: a static box obstacle spanning `min..=max` in world meters. NOT a
+/// world entity — obstacles are plain data on `Simulation` (they never move),
+/// with a matching fixed collider registered in `PhysicsWorld`. Kept out of
+/// the hecs world so checkpoints don't need a component column for them.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct Obstacle {
+    pub id: u32,
+    pub kind: ObstacleKind,
+    pub min: Vector2<f64>,
+    pub max: Vector2<f64>,
+}

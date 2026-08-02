@@ -50,6 +50,16 @@ pub const VISION_FOV_DEGREES: f64 = 340.0;
 /// `cone_cast`, and the grain-visibility filter (5.2: no duplicated literals).
 pub const VISION_MAX_RANGE_M: f64 = 10.0;
 
+/// 4.3: max rejection samples when drawing a spawn/patrol point that must not
+/// land inside an obstacle. With the default urban map (5 boxes over a
+/// 28×17 free area) this succeeds on the first or second try almost always.
+pub const MAX_FREE_POINT_TRIES: u32 = 32;
+
+/// 4.3: line-of-sight tolerance (fraction of the cast). A static hit at
+/// toi >= 1 - EPS means the target itself is touching the obstacle boundary,
+/// not that an obstacle blocks the sight line.
+pub const LOS_BLOCK_EPS: f64 = 1e-4;
+
 /// Median wild lifespan (years) — vitality-model anchor: S(t_mid) = 0.5.
 pub const VITALITY_T_MID_YEARS: f64 = 4.0;
 /// Weibull shape — tuned so S(max_wild_lifespan) < 0.001.

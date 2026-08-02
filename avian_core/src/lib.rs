@@ -27,6 +27,11 @@ pub struct SimulationConfig {
     /// foraging) disable it so no flock is auto-spawned (boids would perturb
     /// the target bird's straight-line path).
     pub immigration_enabled: bool,
+    /// 4.3: when true, `Simulation::new` builds the default urban map (a few
+    /// static box buildings) on top of the empty 32×21 arena. Off by default
+    /// so the existing deterministic test scenarios keep their exact
+    /// trajectories. Obstacles are added by `add_obstacle` either way.
+    pub urban_obstacles: bool,
 }
 
 impl Default for SimulationConfig {
@@ -37,6 +42,7 @@ impl Default for SimulationConfig {
             max_agents: 1000,
             predator_expiry: true,
             immigration_enabled: true,
+            urban_obstacles: false,
         }
     }
 }
@@ -67,6 +73,14 @@ pub struct PredatorSnapshot {
     pub lifetime_remaining_s: f64,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct ObstacleSnapshot {
+    pub id: u32,
+    pub kind: ObstacleKind,
+    pub min: [f64; 2],
+    pub max: [f64; 2],
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SimulationSnapshot {
     pub frame: u32,
@@ -75,6 +89,8 @@ pub struct SimulationSnapshot {
     pub agents: Vec<AgentSnapshot>,
     pub grains: Vec<[f64; 2]>, // Naprawiono zagnieżdżenie (Ticket R2-10)
     pub predators: Vec<PredatorSnapshot>,
+    /// 4.3: static obstacles (buildings/trees/water) — static map geometry.
+    pub obstacles: Vec<ObstacleSnapshot>,
     pub agent_count: usize,
     pub dead_count: u32,
 }
@@ -87,6 +103,9 @@ pub struct Simulation {
     pub physics: PhysicsWorld,
     pub config: SimulationConfig,
     pub environment: EnvironmentState,
+    /// 4.3: static map obstacles (buildings/trees/water). Plain data, not
+    /// world entities — see `Obstacle`.
+    pub obstacles: Vec<Obstacle>,
     pub session_id: u32,
     pub next_uid: u64,
     pub deaths: u32,
@@ -111,7 +130,7 @@ impl Simulation {
         physics.add_wall(nalgebra::Vector2::new(32.0, 21.0), nalgebra::Vector2::new(0.0, 21.0));
         physics.add_wall(nalgebra::Vector2::new(0.0, 21.0), nalgebra::Vector2::new(0.0, 0.0));
 
-        Self {
+        let mut sim = Self {
             world: World::new(),
             rng: rng::SimRng::from_seed(seed),
             time: time::SimulationTime::new(config.dt),
@@ -119,6 +138,7 @@ impl Simulation {
             physics,
             config,
             environment: EnvironmentState::default(),
+            obstacles: Vec::new(),
             session_id: 1,
             next_uid: 1,
             deaths: 0,
@@ -128,7 +148,56 @@ impl Simulation {
             total_energy_expenditure_kj: 0.0,
             total_energy_lost_at_death_kj: 0.0,
             total_energy_inflow_spawn_kj: 0.0,
+        };
+        // 4.3: opt-in default urban map (kept off by default so existing
+        // deterministic test scenarios keep their exact trajectories).
+        if sim.config.urban_obstacles {
+            sim.build_default_obstacles();
         }
+        sim
+    }
+
+    /// 4.3: register a static box obstacle (collider + data). Returns its id.
+    pub fn add_obstacle(&mut self, kind: ObstacleKind, min: Vector2<f64>, max: Vector2<f64>) -> u32 {
+        let id = self.obstacles.len() as u32;
+        self.physics.add_obstacle(min, max);
+        self.obstacles.push(Obstacle { id, kind, min, max });
+        id
+    }
+
+    /// 4.3: the default urban map — three small buildings scattered across the
+    /// 32×21 arena, sized so every corridor stays passable. Called from
+    /// `Simulation::new` when `config.urban_obstacles` is set (and from
+    /// `load_checkpoint` so restored runs rebuild the same map).
+    pub fn build_default_obstacles(&mut self) {
+        self.add_obstacle(ObstacleKind::Building, Vector2::new(6.0, 3.0), Vector2::new(10.0, 7.0));
+        self.add_obstacle(ObstacleKind::Building, Vector2::new(16.0, 8.0), Vector2::new(21.0, 11.0));
+        self.add_obstacle(ObstacleKind::Tree, Vector2::new(13.0, 16.0), Vector2::new(14.5, 18.0));
+        self.add_obstacle(ObstacleKind::Tree, Vector2::new(25.0, 14.0), Vector2::new(26.5, 15.5));
+        self.add_obstacle(ObstacleKind::Water, Vector2::new(7.0, 12.0), Vector2::new(11.0, 13.5));
+    }
+
+    /// 4.3: true if `p` lies strictly inside any obstacle's bounding box.
+    /// Used to keep spawns, immigration and predator patrol waypoints out of
+    /// walls/buildings (the physics collider would otherwise pin them there).
+    pub fn point_in_obstacles(obstacles: &[Obstacle], p: Vector2<f64>) -> bool {
+        obstacles
+            .iter()
+            .any(|o| p.x >= o.min.x && p.x <= o.max.x && p.y >= o.min.y && p.y <= o.max.y)
+    }
+
+    /// 4.3: a random point in the interior of the 32×21 arena that is NOT
+    /// inside any obstacle. Samples up to `MAX_FREE_POINT_TRIES` candidates
+    /// before giving up and returning the last (non-obstructed) draw.
+    pub fn random_free_point(obstacles: &[Obstacle], rng: &mut rng::SimRng) -> Vector2<f64> {
+        let mut p = Vector2::new(0.0, 0.0);
+        for _ in 0..calibration::MAX_FREE_POINT_TRIES {
+            p = Vector2::new(rng.gen_range(2.0..30.0), rng.gen_range(2.0..19.0));
+            if !Self::point_in_obstacles(obstacles, p) {
+                return p;
+            }
+        }
+        p
     }
 
     /// 7.2: total energy currently held by live agents (kJ).
@@ -307,6 +376,12 @@ impl Simulation {
             agents,
             grains,
             predators,
+            obstacles: self.obstacles.iter().map(|o| ObstacleSnapshot {
+                id: o.id,
+                kind: o.kind,
+                min: [o.min.x, o.min.y],
+                max: [o.max.x, o.max.y],
+            }).collect(),
             dead_count: self.deaths,
         }
     }
@@ -358,6 +433,10 @@ impl Simulation {
             total_energy_expenditure_kj: ckpt.total_energy_expenditure_kj,
             total_energy_lost_at_death_kj: ckpt.total_energy_lost_at_death_kj,
             total_energy_inflow_spawn_kj: ckpt.total_energy_inflow_spawn_kj,
+            // 4.3: obstacles are plain data — restored straight from the
+            // checkpoint. The matching fixed colliders already live inside the
+            // restored `physics` state, so nothing is re-added here.
+            obstacles: ckpt.obstacles,
         };
         // Rebuild the spatial grid so it matches world positions immediately.
         sim.rebuild_spatial_grid();

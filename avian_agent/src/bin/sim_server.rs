@@ -15,6 +15,8 @@ fn main() {
     // Parse CLI args: --headless [--frames N] [--output path] [--events-file path] [--seed N]
     let args: Vec<String> = std::env::args().collect();
     let headless = args.iter().any(|a| a == "--headless");
+    // 4.3: opt-in urban map (buildings/trees/water + line-of-sight occlusion).
+    let urban = args.iter().any(|a| a == "--urban");
     let frames_target: u64 = args.iter()
         .position(|a| a == "--frames")
         .and_then(|i| args.get(i + 1))
@@ -43,7 +45,9 @@ fn main() {
         .and_then(|s| Format::from_str(s))
         .unwrap_or(Format::Csv);
 
-    let mut sim = Simulation::new(seed, SimulationConfig::default());
+    let mut config = SimulationConfig::default();
+    config.urban_obstacles = urban;
+    let mut sim = Simulation::new(seed, config);
     let mut exporter = TelemetryExporter::new(usize::MAX);
 
     // 3.4: output path carries the format extension (only set with --output).
@@ -70,7 +74,7 @@ fn main() {
     // and sim_frames are patched in at end of run.
     let mut metadata = TelemetryMetadata::new(
         seed,
-        serde_json::to_value(SimulationConfig::default()).unwrap_or(serde_json::json!({})),
+        serde_json::to_value(&config).unwrap_or(serde_json::json!({})),
         30,
         [calibration::WORLD_WIDTH_M, calibration::WORLD_HEIGHT_M],
         events_file.clone()
@@ -90,10 +94,9 @@ fn main() {
     ctrlc::set_handler(move || { r.store(false, Ordering::SeqCst); }).ok();
 
     for _ in 0..30 {
-        let x = sim.rng.gen_range(2.0..30.0);
-        let y = sim.rng.gen_range(2.0..19.0);
+        let pos = avian_core::Simulation::random_free_point(&sim.obstacles, &mut sim.rng);
         let uid = sim.next_uid_str();
-        spawn_agent(&mut sim.world, &mut sim.rng, nalgebra::Vector2::new(x, y), &mut sim.physics, uid);
+        spawn_agent(&mut sim.world, &mut sim.rng, pos, &mut sim.physics, uid);
     }
     for _ in 0..15 {
         let x = sim.rng.gen_range(2.0..30.0);

@@ -79,6 +79,37 @@ impl PhysicsWorld {
     pub fn add_wall(&mut self, p1: Vector2<f32>, p2: Vector2<f32>) {
         let collider = ColliderBuilder::segment(nalgebra::Point2::new(p1.x, p1.y), nalgebra::Point2::new(p2.x, p2.y)).build();
         self.colliders.insert(collider);
+        // Static geometry must be queryable immediately (the query pipeline's
+        // BVH is otherwise only refreshed inside `step`).
+        self.query_pipeline.update(&self.bodies, &self.colliders);
+    }
+
+    /// 4.3: a static box obstacle (building, water, tree) spanning `min..=max`
+    /// in world meters. Attached to an explicit fixed body so it is both a
+    /// physics barrier (dynamic bodies bounce off) and part of the static set
+    /// used by line-of-sight raycasts (`QueryFilter::only_fixed`).
+    pub fn add_obstacle(&mut self, min: Vector2<f64>, max: Vector2<f64>) {
+        let center = Vector2::new((min.x + max.x) as f32 / 2.0, (min.y + max.y) as f32 / 2.0);
+        let half = Vector2::new((max.x - min.x) as f32 / 2.0, (max.y - min.y) as f32 / 2.0);
+        let rb = RigidBodyBuilder::fixed().translation(center).build();
+        let handle = self.bodies.insert(rb);
+        let collider = ColliderBuilder::cuboid(half.x, half.y).build();
+        self.colliders.insert_with_parent(collider, handle, &mut self.bodies);
+        self.query_pipeline.update(&self.bodies, &self.colliders);
+    }
+
+    /// 4.3: line-of-sight query — does any STATIC collider (wall + obstacle)
+    /// intersect the segment `origin → origin + dir` before `max_toi` (in
+    /// `dir` units)? Dynamic bodies (agents, predators) never block vision.
+    /// Returns the time-of-impact of the first static hit, if any.
+    pub fn cast_ray_to_static(&self, origin: Vector2<f64>, dir: Vector2<f64>, max_toi: f64) -> Option<f64> {
+        let ray = Ray::new(
+            nalgebra::Point2::new(origin.x as f32, origin.y as f32),
+            Vector2::new(dir.x as f32, dir.y as f32),
+        );
+        self.query_pipeline
+            .cast_ray(&self.bodies, &self.colliders, &ray, max_toi as f32, true, QueryFilter::only_fixed())
+            .map(|(_, toi)| toi as f64)
     }
 
     pub fn spawn_agent_body(&mut self, pos: Vector2<f32>, mass: f32) -> u64 {

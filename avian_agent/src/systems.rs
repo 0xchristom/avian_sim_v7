@@ -203,7 +203,16 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         let targets: Vec<(Entity, Vector2<f64>)> = neighbors_raw.iter().filter_map(|(e, _)| {
             positions.get(e).map(|p| (*e, *p))
         }).collect();
-        let visible_neighbors = cone_cast(pos.0, head.0, vision.fov_degrees, calibration::VISION_MAX_RANGE_M, &targets);
+        // 4.3: line-of-sight occlusion — walls/buildings block neighbor AND
+        // grain vision. `sim.physics` is a disjoint field from `sim.world`
+        // (borrowed by query_mut above), so raycasting here is sound.
+        let physics = &sim.physics;
+        let occluded = |target: &Vector2<f64>, _dist: f64| -> bool {
+            physics
+                .cast_ray_to_static(pos.0, *target - pos.0, 1.0)
+                .map_or(false, |toi| toi < 1.0 - calibration::LOS_BLOCK_EPS)
+        };
+        let visible_neighbors = cone_cast(pos.0, head.0, vision.fov_degrees, calibration::VISION_MAX_RANGE_M, &targets, &occluded);
         let visible_neighbor_entities: Vec<Entity> = visible_neighbors.iter().map(|(e, _, _)| *e).collect();
         let visible_neighbor_pos: Vec<[f64; 2]> = visible_neighbors.iter().map(|(_, p, _)| [p.x, p.y]).collect();
 
@@ -213,7 +222,15 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
             if dist > calibration::VISION_MAX_RANGE_M || dist < 1e-6 { return false; }
             let angle = dir.y.atan2(dir.x) - head.0;
             let norm_ang = ((angle + std::f64::consts::PI) % (2.0 * std::f64::consts::PI)) - std::f64::consts::PI;
-            norm_ang.abs() <= vision.fov_degrees.to_radians() / 2.0
+            if norm_ang.abs() > vision.fov_degrees.to_radians() / 2.0 { return false; }
+            // 4.3: hide grain behind a wall/building even inside the FOV cone.
+            if physics
+                .cast_ray_to_static(pos.0, *g_pos - pos.0, 1.0)
+                .map_or(false, |toi| toi < 1.0 - calibration::LOS_BLOCK_EPS)
+            {
+                return false;
+            }
+            true
         }).cloned().collect();
         let visible_grain_pos: Vec<[f64; 2]> = visible_grains.iter().map(|(_, p, _)| [p.x, p.y]).collect();
 
@@ -409,14 +426,15 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
 
     // 2.4: immigration — keep the population above the minimum.
     // 4.2: gated by config for deterministic single-bird tests.
+    // 4.3: spawn into obstacle-free points so new arrivals aren't pinned
+    // inside a building collider.
     let live = sim.world.query::<&Metabolism>().iter().count();
     if sim.config.immigration_enabled && live < calibration::MIN_POPULATION {
         let missing = calibration::MIN_POPULATION - live;
         for _ in 0..missing {
-            let x = sim.rng.gen_range(2.0..30.0);
-            let y = sim.rng.gen_range(2.0..19.0);
+            let pos = avian_core::Simulation::random_free_point(&sim.obstacles, &mut sim.rng);
             let uid = sim.next_uid_str();
-            let e = spawn_agent(&mut sim.world, &mut sim.rng, Vector2::new(x, y), &mut sim.physics, uid);
+            let e = spawn_agent(&mut sim.world, &mut sim.rng, pos, &mut sim.physics, uid);
             // 7.2: energy carried in by the respawned agent.
             if let Ok(meta) = sim.world.get::<&Metabolism>(e) {
                 sim.total_energy_inflow_spawn_kj += meta.energy_kj;

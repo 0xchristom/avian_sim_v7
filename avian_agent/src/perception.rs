@@ -1,12 +1,13 @@
 use nalgebra::Vector2;
 use hecs::Entity;
 
-pub fn cone_cast(
+pub fn cone_cast<F: Fn(&Vector2<f64>, f64) -> bool>(
     origin: Vector2<f64>,
     heading: f64,
     fov: f64,
     max_dist: f64,
     targets: &[(Entity, Vector2<f64>)],
+    occluded: F,
 ) -> Vec<(Entity, Vector2<f64>, f64)> {
     let mut visible = Vec::new();
     let half_fov = fov.to_radians() / 2.0;
@@ -22,6 +23,11 @@ pub fn cone_cast(
         let normalized_angle = ((angle + std::f64::consts::PI) % (2.0 * std::f64::consts::PI)) - std::f64::consts::PI;
         
         if normalized_angle.abs() <= half_fov {
+            // 4.3: line-of-sight occlusion — a wall or building on the sight
+            // line hides the target even inside the FOV cone.
+            if occluded(pos, dist) {
+                continue;
+            }
             let res = 1.0 / (1.0 + 0.1 * normalized_angle.abs().to_degrees());
             visible.push((*entity, *pos, res));
         }

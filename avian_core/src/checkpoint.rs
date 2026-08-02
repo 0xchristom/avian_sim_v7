@@ -282,10 +282,13 @@ pub struct Checkpoint {
     pub total_energy_expenditure_kj: f64,
     pub total_energy_lost_at_death_kj: f64,
     pub total_energy_inflow_spawn_kj: f64,
+    /// 4.3: static map obstacles. They are plain data (not world entities), so
+    /// they travel in the checkpoint instead of a component column.
+    pub obstacles: Vec<Obstacle>,
     pub world_bytes: Vec<u8>,
 }
 
-pub const CHECKPOINT_VERSION: u32 = 1;
+pub const CHECKPOINT_VERSION: u32 = 2;
 
 /// Serialize the world column into a `Vec<u8>` via bincode.
 pub fn serialize_world(world: &World) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -324,6 +327,7 @@ pub fn build_checkpoint(sim: &crate::Simulation) -> Result<Checkpoint, Box<dyn s
         total_energy_expenditure_kj: sim.total_energy_expenditure_kj,
         total_energy_lost_at_death_kj: sim.total_energy_lost_at_death_kj,
         total_energy_inflow_spawn_kj: sim.total_energy_inflow_spawn_kj,
+        obstacles: sim.obstacles.clone(),
         world_bytes,
     })
 }

@@ -56,6 +56,14 @@ pub fn collect_threats(sim: &Simulation) -> FxHashMap<Entity, Vector2<f64>> {
             if norm_ang.abs() > vision.fov_degrees.to_radians() / 2.0 {
                 continue;
             }
+            // 4.3: a wall/building on the sight line hides the hawk.
+            if sim
+                .physics
+                .cast_ray_to_static(pos.0, offset, 1.0)
+                .map_or(false, |toi| toi < 1.0 - calibration::LOS_BLOCK_EPS)
+            {
+                continue;
+            }
             let away = -offset / dist;
             if nearest.map_or(true, |(d, _)| dist < d) {
                 nearest = Some((dist, away));
@@ -115,11 +123,12 @@ pub fn plan_movement(sim: &mut Simulation, positions: &FxHashMap<Entity, Vector2
                 }
             }
             _ => {
-                // Patrol mode: waypoint, re-randomize once reached.
-                let target = patrol_target.unwrap_or_else(|| random_patrol_target(&mut sim.rng));
+                // Patrol mode: waypoint, re-randomize once reached. 4.3: sample
+                // obstacle-free points so the hawk never patrols INTO a building.
+                let target = patrol_target.unwrap_or_else(|| random_patrol_target(&mut sim.rng, &sim.obstacles));
                 let dir = target - ppos;
                 if dir.norm() < 1.0 {
-                    new_patrol = Some(random_patrol_target(&mut sim.rng));
+                    new_patrol = Some(random_patrol_target(&mut sim.rng, &sim.obstacles));
                 }
                 if dir.norm() > 1e-6 {
                     dir / dir.norm() * pred_speed
@@ -143,23 +152,21 @@ pub fn plan_movement(sim: &mut Simulation, positions: &FxHashMap<Entity, Vector2
     updates.into_iter().map(|(id, v, _)| (id, v)).collect()
 }
 
-fn random_patrol_target(rng: &mut SimRng) -> Vector2<f64> {
-    let x = rng.gen_range(2.0..30.0);
-    let y = rng.gen_range(2.0..19.0);
-    Vector2::new(x, y)
+fn random_patrol_target(rng: &mut SimRng, obstacles: &[avian_core::components::Obstacle]) -> Vector2<f64> {
+    avian_core::Simulation::random_free_point(obstacles, rng)
 }
 
 /// A patrol waypoint at least `PREDATOR_REPOSITION_MIN_DIST` away from `pos`,
 /// so a hawk that just struck sweeps into a NEW area instead of re-pinning the
 /// same cluster.
-fn far_random_point(rng: &mut SimRng, pos: Vector2<f64>) -> Vector2<f64> {
+fn far_random_point(rng: &mut SimRng, pos: Vector2<f64>, obstacles: &[avian_core::components::Obstacle]) -> Vector2<f64> {
     for _ in 0..16 {
-        let p = random_patrol_target(rng);
+        let p = random_patrol_target(rng, obstacles);
         if (p - pos).norm() >= calibration::PREDATOR_REPOSITION_MIN_DIST_M {
             return p;
         }
     }
-    random_patrol_target(rng)
+    random_patrol_target(rng, obstacles)
 }
 
 /// Contact resolution: after position sync, roll capture for each predator/
@@ -191,7 +198,7 @@ pub fn resolve_contact(sim: &mut Simulation, positions: &FxHashMap<Entity, Vecto
                     // stop chasing while repositioning, so the predator RANGES
                     // the map instead of pinning one local cluster.
                     if let Ok(mut pr) = sim.world.get::<&mut Predator>(*pid) {
-                        pr.patrol_target = Some(far_random_point(&mut sim.rng, *ppos));
+                        pr.patrol_target = Some(far_random_point(&mut sim.rng, *ppos, &sim.obstacles));
                         pr.capture_cooldown = calibration::PREDATOR_REPOSITION_COOLDOWN_FRAMES;
                     }
                 } else if let Ok(mut pr) = sim.world.get::<&mut Predator>(*pid) {

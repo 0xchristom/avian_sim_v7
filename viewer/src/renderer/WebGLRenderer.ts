@@ -9,6 +9,7 @@ export class WebGLRenderer {
   private grainMesh: THREE.InstancedMesh;
   private predatorMesh: THREE.InstancedMesh;
   private nightOverlay: THREE.Mesh;
+  private obstacleGroup: THREE.Group;
   private predatorLabels: THREE.Sprite[] = [];
   private selectionMarkers: THREE.Mesh[] = [];
 
@@ -62,6 +63,10 @@ export class WebGLRenderer {
     this.nightOverlay.position.set(16, 10.5, 5);
     this.nightOverlay.renderOrder = 999;
     this.scene.add(this.nightOverlay);
+
+    // 4.3: static urban obstacles (buildings/trees/water), rebuilt per frame.
+    this.obstacleGroup = new THREE.Group();
+    this.scene.add(this.obstacleGroup);
   }
 
   render(snapshot: any, selectedUids: string[] = []) {
@@ -121,6 +126,9 @@ export class WebGLRenderer {
     // 2.2b: countdown label (remaining seconds, small font) beside each predator.
     this.updatePredatorLabels(snapshot.predators || []);
 
+    // 4.3: draw the static urban obstacles.
+    this.updateObstacles(snapshot.obstacles || []);
+
     // Marking tool: green ring around every selected agent/predator.
     this.updateSelectionMarkers(snapshot, selectedUids);
 
@@ -131,6 +139,41 @@ export class WebGLRenderer {
     }
 
     this.renderer.render(this.scene, this.camera);
+  }
+
+  // 4.3: rebuild the static obstacle quads from the snapshot each frame.
+  // Obstacles are few (≤ a handful), so full rebuild is cheaper than a
+  // diffed pool and avoids any stale-geometry state.
+  private updateObstacles(
+    obstacles: Array<{ id: number; kind: string; min: [number, number]; max: [number, number] }>,
+  ) {
+    for (const child of this.obstacleGroup.children) {
+      this.obstacleGroup.remove(child);
+      (child as THREE.Mesh).geometry.dispose();
+      ((child as THREE.Mesh).material as THREE.Material).dispose();
+    }
+
+    const kindColor: Record<string, number> = {
+      Building: 0x8b93a6,
+      Wall: 0x5a6472,
+      Water: 0x3b82f6,
+      Tree: 0x22c55e,
+    };
+    obstacles.forEach((o) => {
+      const w = o.max[0] - o.min[0];
+      const h = o.max[1] - o.min[1];
+      const geom = new THREE.PlaneGeometry(w, h);
+      const mat = new THREE.MeshBasicMaterial({
+        color: kindColor[o.kind] ?? 0x888888,
+        transparent: o.kind === 'Water',
+        opacity: o.kind === 'Water' ? 0.75 : 1.0,
+        depthTest: false,
+      });
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.position.set((o.min[0] + o.max[0]) / 2, (o.min[1] + o.max[1]) / 2, 0.15);
+      mesh.renderOrder = 5;
+      this.obstacleGroup.add(mesh);
+    });
   }
 
   private updatePredatorLabels(predators: Array<{ pos: [number, number]; lifetime_remaining_s: number }>) {
