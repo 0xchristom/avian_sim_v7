@@ -28,6 +28,11 @@ pub const FLY_SPEED_MS: f64 = 15.0;
 /// starved predator detection (2.2): a hawk chasing from behind was invisible.
 pub const VISION_FOV_DEGREES: f64 = 340.0;
 
+/// Maximum perception range (m) for neighbor/grain/predator queries. Single
+/// source of truth for the per-agent query radius — used by `query_k_nearest`,
+/// `cone_cast`, and the grain-visibility filter (5.2: no duplicated literals).
+pub const VISION_MAX_RANGE_M: f64 = 10.0;
+
 /// Median wild lifespan (years) — vitality-model anchor: S(t_mid) = 0.5.
 pub const VITALITY_T_MID_YEARS: f64 = 4.0;
 /// Weibull shape — tuned so S(max_wild_lifespan) < 0.001.

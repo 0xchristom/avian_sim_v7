@@ -16,7 +16,8 @@ use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 
 /// Export format (3.4). CSV is the compact-default; JSONL is the lossless
-/// debugging format. Parquet is feature-gated (see Cargo.toml `parquet`).
+/// debugging format. Parquet is deliberately NOT planned at current scale
+/// (see development plan §3.4) — CSV/JSONL satisfy present needs.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Format {
     Csv,

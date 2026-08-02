@@ -12,7 +12,7 @@ use std::net::TcpStream;
 use tungstenite::WebSocket;
 
 fn main() {
-    // Parse CLI args: --headless [--frames N] [--output path] [--events-file path]
+    // Parse CLI args: --headless [--frames N] [--output path] [--events-file path] [--seed N]
     let args: Vec<String> = std::env::args().collect();
     let headless = args.iter().any(|a| a == "--headless");
     let frames_target: u64 = args.iter()
@@ -20,6 +20,12 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(0); // 0 = unlimited
+    // Per-run seed — metadata.json is designed to track this per run.
+    let seed: u64 = args.iter()
+        .position(|a| a == "--seed")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(42);
     // Telemetry file output is opt-in via `--output <path>`. Without it the
     // server runs without writing any dataset, so it never grows a dataset.csv.
     let output_path = args.iter()
@@ -37,7 +43,7 @@ fn main() {
         .and_then(|s| Format::from_str(s))
         .unwrap_or(Format::Csv);
 
-    let mut sim = Simulation::new(42, SimulationConfig::default());
+    let mut sim = Simulation::new(seed, SimulationConfig::default());
     let mut exporter = TelemetryExporter::new(usize::MAX);
 
     // 3.4: output path carries the format extension (only set with --output).
@@ -63,7 +69,7 @@ fn main() {
     // 3.7: dataset metadata (schema authority) written up front; reward stats
     // and sim_frames are patched in at end of run.
     let mut metadata = TelemetryMetadata::new(
-        42,
+        seed,
         serde_json::to_value(SimulationConfig::default()).unwrap_or(serde_json::json!({})),
         30,
         [calibration::WORLD_WIDTH_M, calibration::WORLD_HEIGHT_M],
@@ -140,6 +146,7 @@ fn main() {
     server.set_nonblocking(true).ok();
 
     let mut clients: Vec<WebSocket<TcpStream>> = Vec::new();
+    let mut frame: u64 = 0;
 
     while running.load(Ordering::SeqCst) {
         // Accept new connections
@@ -160,6 +167,7 @@ fn main() {
 
         // Run one simulation step
         sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        frame += 1;
         let snap = sim.snapshot();
         let json = serde_json::to_string(&snap).unwrap();
 
@@ -212,7 +220,7 @@ fn main() {
 
     println!("Shutting down. {} telemetry frames written to {}", exporter.frame_count(), out_path.as_deref().unwrap_or("(no telemetry file)"));
     exporter.finish();
-    metadata.sim_frames = 0;
+    metadata.sim_frames = frame;
     metadata.reward_stats = exporter.reward_stats();
     if let Some(mp) = &meta_path {
         let _ = write_metadata(std::path::Path::new(mp), &metadata);

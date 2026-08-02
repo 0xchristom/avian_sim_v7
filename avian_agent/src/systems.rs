@@ -136,18 +136,18 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
                     + 0.4 * (1.0 - blood_glucose / 5.0).max(0.0);
 
         // Fix #6: Query neighbors only from agent positions (grains excluded).
-        let neighbors_raw = sim.spatial_grid.query_k_nearest(pos.0, 7, 10.0, &positions);
+        let neighbors_raw = sim.spatial_grid.query_k_nearest(pos.0, 7, calibration::VISION_MAX_RANGE_M, &positions);
         let targets: Vec<(Entity, Vector2<f64>)> = neighbors_raw.iter().filter_map(|(e, _)| {
             positions.get(e).map(|p| (*e, *p))
         }).collect();
-        let visible_neighbors = cone_cast(pos.0, head.0, vision.fov_degrees, 10.0, &targets);
+        let visible_neighbors = cone_cast(pos.0, head.0, vision.fov_degrees, calibration::VISION_MAX_RANGE_M, &targets);
         let visible_neighbor_entities: Vec<Entity> = visible_neighbors.iter().map(|(e, _, _)| *e).collect();
         let visible_neighbor_pos: Vec<[f64; 2]> = visible_neighbors.iter().map(|(_, p, _)| [p.x, p.y]).collect();
 
         let visible_grains: Vec<(Entity, Vector2<f64>, u32)> = grains.iter().filter(|(_, g_pos, _)| {
             let dir = *g_pos - pos.0;
             let dist = dir.norm();
-            if dist > 10.0 || dist < 1e-6 { return false; }
+            if dist > calibration::VISION_MAX_RANGE_M || dist < 1e-6 { return false; }
             let angle = dir.y.atan2(dir.x) - head.0;
             let norm_ang = ((angle + std::f64::consts::PI) % (2.0 * std::f64::consts::PI)) - std::f64::consts::PI;
             norm_ang.abs() <= vision.fov_degrees.to_radians() / 2.0

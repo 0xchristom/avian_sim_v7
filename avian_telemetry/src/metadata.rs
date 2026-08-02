@@ -96,6 +96,19 @@ pub fn git_commit() -> Option<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
+/// Capture the toolchain version at runtime (`rustc --version`). The
+/// `RUSTC_VERSION` env var is not a standard Cargo-provided variable, so it
+/// can never be relied on; running `rustc --version` mirrors `git_commit()`.
+pub fn rustc_version() -> String {
+    std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".into())
+}
+
 impl TelemetryMetadata {
     pub fn new(
         seed: u64,
@@ -120,7 +133,7 @@ impl TelemetryMetadata {
             sim_frames,
             events_injected,
             reward_stats,
-            rust_version: std::env::var("RUSTC_VERSION").unwrap_or_else(|_| "unknown".into()),
+            rust_version: rustc_version(),
             commit: git_commit(),
         }
     }

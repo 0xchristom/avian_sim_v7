@@ -5,6 +5,7 @@
 //! ```text
 //! root = Selector [
 //!     Flee,              // 2.2 — highest priority, overrides ALL
+//!     Sick,              // 2.7 — debility; a sick bird still evades a predator
 //!     CriticalEnergy,    // 2.0 — energy < threshold → force forage
 //!     NightRest,         // 2.3 — light < 0.3 → rest (stop moving, reduced drain)
 //!     Preen,             // 2.6 — feathers_condition < threshold

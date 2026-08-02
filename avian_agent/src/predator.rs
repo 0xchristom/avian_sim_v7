@@ -11,8 +11,9 @@
 //!    are within `PREDATOR_DETECTION_RADIUS_M` AND inside their FOV. Feeds the
 //!    2.0 `Flee` branch (highest priority) + `Alarm` telemetry.
 //! 2. `plan_movement` — chase the nearest agent, applied before `physics.step`.
-//! 3. `resolve_contact` — after positions sync: dist < 0.3m → 50% kill /
-//!    50% miss+cooldown.
+//! 3. `resolve_contact` — after positions sync: dist < `PREDATOR_CONTACT_DISTANCE_M`
+//!    (1.0m, ≈ combined body radii; a 0.3m gap is unreachable while the 0.4+0.5
+//!    colliders overlap-free) → 50% kill / 50% miss+cooldown.
 
 use avian_core::Simulation;
 use avian_core::calibration;

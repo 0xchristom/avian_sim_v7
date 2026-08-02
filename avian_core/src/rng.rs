@@ -27,7 +27,8 @@
 //! The parallel executor then: splits agent queries into chunks; each chunk
 //! uses its own deterministic substream; merges outputs in entity order.
 //! Determinism holds by construction, verified by the 7.1 serial-vs-parallel
-//! byte-identical test (Sprint 6 ships the implementation).
+//! byte-identical test. (5.4 implementation is DEFERRED — no >30-agent headless
+//! generation need yet; only this design landed, in Sprint 0.)
 
 use rand_chacha::ChaCha8Rng;
 use rand::{Rng, RngCore, SeedableRng};
