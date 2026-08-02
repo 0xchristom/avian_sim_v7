@@ -8,6 +8,8 @@
 //! Sprint 0 delivers the core set: mass, BMR, speed, vitality model. Phase-2
 //! consumer constants (boids weights, predator, night drain) land in Sprint 1.
 
+use crate::components::Weather;
+
 /// Adult body mass (g). Feral pigeons: 300-350 g.
 pub const ADULT_MASS_G: f64 = 315.0;
 /// Hatchling mass (g) — Phase 8 breeding curve.
@@ -132,6 +134,50 @@ pub const FEATHER_DECAY_RATE_S: f64 = 0.05;
 pub const FEATHER_PREEN_RESTORE_RATE_S: f64 = 0.4;
 /// Rain multiplies feather decay (2.6/4.4 — hook ready for the weather sprint).
 pub const RAIN_FEATHER_DECAY_MULTIPLIER: f64 = 4.0;
+
+// ---------------------------------------------------------------------------
+// 4.4 Weather.
+// ---------------------------------------------------------------------------
+/// Weather re-roll cadence (frames) — the stochastic scheduler re-draws the
+/// global weather state every this many frames.
+pub const WEATHER_UPDATE_INTERVAL_FRAMES: u32 = 600;
+/// Ramp rate (per sim-second) of `weather_intensity` — a full 0↔1 transition
+/// takes 1.0 s, so weather effects fade in/out instead of snapping.
+pub const WEATHER_RAMP_RATE_PER_S: f64 = 1.0;
+/// Rain cuts vision range to this fraction of `VISION_MAX_RANGE_M` (wet
+/// feathers, heavy overcast).
+pub const RAIN_VISIBILITY_FACTOR: f64 = 0.6;
+/// Wind drift speed (m/s) added to every body's velocity while Wind is active.
+pub const WIND_SPEED_MS: f64 = 4.0;
+/// Wind multiplies the flight metabolic rate — flying in wind costs more.
+pub const WIND_FLIGHT_MR_MULTIPLIER: f64 = 1.5;
+/// Heat multiplies basal metabolism (water-need proxy: no dedicated thirst
+/// channel in v7, so faster dehydration shows up as faster energy burn).
+pub const HEAT_BMR_MULTIPLIER: f64 = 1.25;
+
+/// 4.4: vision-range multiplier for the current weather (1.0 except rain).
+pub fn weather_vision_scale(weather: Weather, intensity: f64) -> f64 {
+    match weather {
+        Weather::Rain => 1.0 - (1.0 - RAIN_VISIBILITY_FACTOR) * intensity.clamp(0.0, 1.0),
+        _ => 1.0,
+    }
+}
+
+/// 4.4: basal-metabolism multiplier for the current weather (heat only).
+pub fn weather_metabolic_multiplier(weather: Weather, intensity: f64) -> f64 {
+    match weather {
+        Weather::Heat => 1.0 + (HEAT_BMR_MULTIPLIER - 1.0) * intensity.clamp(0.0, 1.0),
+        _ => 1.0,
+    }
+}
+
+/// 4.4: flight-metabolism multiplier for the current weather (wind only).
+pub fn weather_wind_flight_multiplier(weather: Weather, intensity: f64) -> f64 {
+    match weather {
+        Weather::Wind => 1.0 + (WIND_FLIGHT_MR_MULTIPLIER - 1.0) * intensity.clamp(0.0, 1.0),
+        _ => 1.0,
+    }
+}
 
 /// Vitality below which an agent is Sick (2.7) — from the 4.0 Weibull model.
 pub const SICK_VITALITY_THRESHOLD: f64 = 0.3;
@@ -346,5 +392,19 @@ mod tests {
         assert!(MEMORY_DECAY_FRAMES > 0);
         assert!(MEMORY_FOUND_DIST_M > 0.0 && MEMORY_FOUND_DIST_M <= 0.5);
         assert!((0.0..1.0).contains(&MEMORY_MIN_STRENGTH));
+        // 4.4 weather: sane bounds + smooth helpers.
+        assert!((0.0..1.0).contains(&RAIN_VISIBILITY_FACTOR));
+        assert!(WIND_SPEED_MS > 0.0);
+        assert!(WIND_FLIGHT_MR_MULTIPLIER > 1.0);
+        assert!(HEAT_BMR_MULTIPLIER > 1.0);
+        assert!(WEATHER_RAMP_RATE_PER_S > 0.0);
+        assert!(WEATHER_UPDATE_INTERVAL_FRAMES > 0);
+        assert!((weather_vision_scale(Weather::Clear, 1.0) - 1.0).abs() < 1e-12);
+        assert!((weather_vision_scale(Weather::Rain, 0.0) - 1.0).abs() < 1e-12);
+        assert!((weather_vision_scale(Weather::Rain, 1.0) - RAIN_VISIBILITY_FACTOR).abs() < 1e-12);
+        assert!((weather_metabolic_multiplier(Weather::Heat, 1.0) - HEAT_BMR_MULTIPLIER).abs() < 1e-12);
+        assert!((weather_metabolic_multiplier(Weather::Clear, 1.0) - 1.0).abs() < 1e-12);
+        assert!((weather_wind_flight_multiplier(Weather::Wind, 1.0) - WIND_FLIGHT_MR_MULTIPLIER).abs() < 1e-12);
+        assert!((weather_wind_flight_multiplier(Weather::Wind, 0.0) - 1.0).abs() < 1e-12);
     }
 }

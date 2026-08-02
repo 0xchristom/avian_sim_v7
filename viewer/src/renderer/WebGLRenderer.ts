@@ -9,6 +9,7 @@ export class WebGLRenderer {
   private grainMesh: THREE.InstancedMesh;
   private predatorMesh: THREE.InstancedMesh;
   private nightOverlay: THREE.Mesh;
+  private weatherOverlay: THREE.Mesh;
   private obstacleGroup: THREE.Group;
   private predatorLabels: THREE.Sprite[] = [];
   private selectionMarkers: THREE.Mesh[] = [];
@@ -63,6 +64,18 @@ export class WebGLRenderer {
     this.nightOverlay.position.set(16, 10.5, 5);
     this.nightOverlay.renderOrder = 999;
     this.scene.add(this.nightOverlay);
+
+    // 4.4: weather tint — rain dims blue, heat warms amber, wind stays clear.
+    const weatherMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0,
+      depthTest: false,
+    });
+    this.weatherOverlay = new THREE.Mesh(new THREE.PlaneGeometry(32, 21), weatherMat);
+    this.weatherOverlay.position.set(16, 10.5, 4);
+    this.weatherOverlay.renderOrder = 998;
+    this.scene.add(this.weatherOverlay);
 
     // 4.3: static urban obstacles (buildings/trees/water), rebuilt per frame.
     this.obstacleGroup = new THREE.Group();
@@ -138,7 +151,24 @@ export class WebGLRenderer {
       mat.opacity = Math.max(0, 1 - snapshot.light_level);
     }
 
+    // 4.4: tint the scene by weather (scaled by the smooth transition intensity).
+    this.updateWeatherOverlay(snapshot.weather, snapshot.weather_intensity);
+
     this.renderer.render(this.scene, this.camera);
+  }
+
+  private updateWeatherOverlay(weather: string, intensity: number) {
+    const i = Math.min(1, Math.max(0, intensity ?? 0));
+    const mat = this.weatherOverlay.material as THREE.MeshBasicMaterial;
+    if (weather === 'Rain') {
+      mat.color.setHex(0x2f6fdb);
+      mat.opacity = 0.35 * i;
+    } else if (weather === 'Heat') {
+      mat.color.setHex(0xff9a3c);
+      mat.opacity = 0.25 * i;
+    } else {
+      mat.opacity = 0;
+    }
   }
 
   // 4.3: rebuild the static obstacle quads from the snapshot each frame.

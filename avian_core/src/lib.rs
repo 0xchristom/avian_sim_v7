@@ -32,6 +32,12 @@ pub struct SimulationConfig {
     /// so the existing deterministic test scenarios keep their exact
     /// trajectories. Obstacles are added by `add_obstacle` either way.
     pub urban_obstacles: bool,
+    /// 4.4: when true, the stochastic weather scheduler runs (re-rolls
+    /// Clear/Rain/Wind/Heat every ~5 sim-seconds with smooth 1-s ramps). Off
+    /// by default so the existing deterministic scenarios keep Clear weather
+    /// and their exact trajectories. Weather can still be forced per-run via
+    /// the `SetWeather` event regardless of this flag.
+    pub weather_enabled: bool,
 }
 
 impl Default for SimulationConfig {
@@ -43,6 +49,7 @@ impl Default for SimulationConfig {
             predator_expiry: true,
             immigration_enabled: true,
             urban_obstacles: false,
+            weather_enabled: false,
         }
     }
 }
@@ -86,6 +93,9 @@ pub struct SimulationSnapshot {
     pub frame: u32,
     pub time_us: u64,
     pub light_level: f64,
+    /// 4.4: current weather state + blend intensity for the viewer.
+    pub weather: String,
+    pub weather_intensity: f64,
     pub agents: Vec<AgentSnapshot>,
     pub grains: Vec<[f64; 2]>, // Naprawiono zagnieżdżenie (Ticket R2-10)
     pub predators: Vec<PredatorSnapshot>,
@@ -292,6 +302,11 @@ impl Simulation {
             }
             Event::SetWeather(req) => {
                 self.environment.weather = req.weather;
+                // 4.4: entering Wind picks a fresh global wind direction so
+                // event-forced weather behaves like scheduler-rolled weather.
+                if req.weather == Weather::Wind {
+                    self.environment.wind_heading = self.rng.gen_range(0.0..std::f64::consts::TAU);
+                }
             }
             Event::TeleportAgent(req) => {
                 if let Some(id) = self.find_agent_uid(&req.uid) {
@@ -372,6 +387,8 @@ impl Simulation {
             frame: self.time.frame,
             time_us: self.time.time_us,
             light_level: self.environment.light_level,
+            weather: format!("{:?}", self.environment.weather),
+            weather_intensity: self.environment.weather_intensity,
             agent_count: agents.len(),
             agents,
             grains,

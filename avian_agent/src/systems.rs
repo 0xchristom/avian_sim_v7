@@ -69,11 +69,23 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     sim.environment.light_level = 0.1
         + 0.9 * (0.5 + 0.5 * (2.0 * std::f64::consts::PI * (h - 12.0) / 24.0).cos());
 
+    // 4.4: stochastic weather scheduler (config-gated; no-op when disabled).
+    crate::weather::update(sim);
+
     // 2.5: flush injected events to telemetry with their frame number
     // (ground-truth annotations).
     for (frame, ev) in sim.events_log.drain(..) {
         exporter.log_event(frame, &serde_json::to_string(&ev).unwrap_or_default());
     }
+
+    // 4.4: current weather multipliers, shared by every agent this frame so
+    // the two drain paths (metabolism_system + inline mirror) stay in lockstep.
+    let env_weather = sim.environment.weather;
+    let env_intensity = sim.environment.weather_intensity;
+    let heat_mult = calibration::weather_metabolic_multiplier(env_weather, env_intensity);
+    let wind_flight_mult = calibration::weather_wind_flight_multiplier(env_weather, env_intensity);
+    let vis_scale = calibration::weather_vision_scale(env_weather, env_intensity);
+    let vision_range = calibration::VISION_MAX_RANGE_M * vis_scale;
 
     // 7.2: account metabolism_system's drain + digestion inflow for the
     // energy-balance test.
@@ -81,6 +93,8 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         &mut sim.world,
         &sim.time,
         sim.environment.light_level,
+        heat_mult,
+        wind_flight_mult,
     );
     sim.total_energy_expenditure_kj += drained;
     sim.total_energy_intake_kj += digested;
@@ -178,9 +192,13 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         // Energy drain (inline mirror of metabolism_system, with night factor).
         // 4.1: same FLIGHT_MR_MULTIPLIER helper as metabolism_system so the
         // 7.2 energy-balance accounting stays exact across the two drains.
+        // 4.4: heat scales BMR; wind scales the flight MR when airborne.
         let mass_kg = mass.current_g / 1000.0;
         let v_mag = vel.0.norm();
-        let bmr_kj_s = meta.bmr_watts * calibration::flight_mr_multiplier(v_mag) / 1000.0;
+        let flying = v_mag >= calibration::FLIGHT_SPEED_THRESHOLD_MS;
+        let wind_on_flight = if flying { wind_flight_mult } else { 1.0 };
+        let bmr_kj_s =
+            meta.bmr_watts * calibration::flight_mr_multiplier(v_mag) * heat_mult * wind_on_flight / 1000.0;
         let cot_kj_s = 12.5 * mass_kg * v_mag / 1000.0;
         let night_factor = if sim.environment.light_level < calibration::NIGHT_REST_LIGHT_THRESHOLD {
             calibration::NIGHT_DRAIN_FACTOR
@@ -199,7 +217,8 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
                     + 0.4 * (1.0 - blood_glucose / 5.0).max(0.0);
 
         // Fix #6: Query neighbors only from agent positions (grains excluded).
-        let neighbors_raw = sim.spatial_grid.query_k_nearest(pos.0, 7, calibration::VISION_MAX_RANGE_M, &positions);
+        // 4.4: vision_range shrinks in rain (wet feathers, overcast).
+        let neighbors_raw = sim.spatial_grid.query_k_nearest(pos.0, 7, vision_range, &positions);
         let targets: Vec<(Entity, Vector2<f64>)> = neighbors_raw.iter().filter_map(|(e, _)| {
             positions.get(e).map(|p| (*e, *p))
         }).collect();
@@ -212,14 +231,14 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
                 .cast_ray_to_static(pos.0, *target - pos.0, 1.0)
                 .map_or(false, |toi| toi < 1.0 - calibration::LOS_BLOCK_EPS)
         };
-        let visible_neighbors = cone_cast(pos.0, head.0, vision.fov_degrees, calibration::VISION_MAX_RANGE_M, &targets, &occluded);
+        let visible_neighbors = cone_cast(pos.0, head.0, vision.fov_degrees, vision_range, &targets, &occluded);
         let visible_neighbor_entities: Vec<Entity> = visible_neighbors.iter().map(|(e, _, _)| *e).collect();
         let visible_neighbor_pos: Vec<[f64; 2]> = visible_neighbors.iter().map(|(_, p, _)| [p.x, p.y]).collect();
 
         let visible_grains: Vec<(Entity, Vector2<f64>, u32)> = grains.iter().filter(|(_, g_pos, _)| {
             let dir = *g_pos - pos.0;
             let dist = dir.norm();
-            if dist > calibration::VISION_MAX_RANGE_M || dist < 1e-6 { return false; }
+            if dist > vision_range || dist < 1e-6 { return false; }
             let angle = dir.y.atan2(dir.x) - head.0;
             let norm_ang = ((angle + std::f64::consts::PI) % (2.0 * std::f64::consts::PI)) - std::f64::consts::PI;
             if norm_ang.abs() > vision.fov_degrees.to_radians() / 2.0 { return false; }
@@ -324,10 +343,22 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     }
 
     // Apply agent velocities + predator pursuit, then one physics step.
+    // 4.4: while Wind is active, a global drift is ADDED to every body (agents
+    // AND predators), scaled by the smooth weather intensity.
+    let wind_drift: Vector2<f64> = if env_weather == Weather::Wind {
+        let i = env_intensity;
+        Vector2::new(
+            calibration::WIND_SPEED_MS * i * sim.environment.wind_heading.cos(),
+            calibration::WIND_SPEED_MS * i * sim.environment.wind_heading.sin(),
+        )
+    } else {
+        Vector2::zeros()
+    };
     for (id, linvel) in commands {
         if let Ok(handle) = sim.world.get::<&PhysicsHandle>(id) {
             if let Some(rb) = sim.physics.get_body_mut(handle.0) {
-                rb.set_linvel(nalgebra::Vector2::new(linvel.x as f32, linvel.y as f32), true);
+                let v = linvel + wind_drift;
+                rb.set_linvel(nalgebra::Vector2::new(v.x as f32, v.y as f32), true);
             }
         }
     }
@@ -335,7 +366,8 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     for (id, linvel) in pred_moves {
         if let Ok(handle) = sim.world.get::<&PhysicsHandle>(id) {
             if let Some(rb) = sim.physics.get_body_mut(handle.0) {
-                rb.set_linvel(nalgebra::Vector2::new(linvel.x as f32, linvel.y as f32), true);
+                let v = linvel + wind_drift;
+                rb.set_linvel(nalgebra::Vector2::new(v.x as f32, v.y as f32), true);
             }
         }
     }

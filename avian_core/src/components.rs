@@ -103,6 +103,8 @@ pub enum Weather {
     Clear,
     Rain,
     Wind,
+    /// Appended last so pre-4.4 bincode checkpoints keep their discriminants.
+    Heat,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -110,6 +112,14 @@ pub struct EnvironmentState {
     pub time_of_day_hours: f64,
     pub light_level: f64,
     pub weather: Weather,
+    /// 4.4: 0..1 smooth blend toward the active weather (1.0 when weather is
+    /// non-Clear, 0.0 in Clear). Effects scale by this, so weather ramps
+    /// in/out over ~1 sim-second instead of snapping.
+    pub weather_intensity: f64,
+    /// 4.4: frames until the weather scheduler re-rolls the global state.
+    pub weather_frames_left: u32,
+    /// 4.4: global wind direction (radians); re-rolled when Wind starts.
+    pub wind_heading: f64,
 }
 
 impl Default for EnvironmentState {
@@ -121,6 +131,9 @@ impl Default for EnvironmentState {
             time_of_day_hours: 12.0,
             light_level: 1.0,
             weather: Weather::Clear,
+            weather_intensity: 0.0,
+            weather_frames_left: crate::calibration::WEATHER_UPDATE_INTERVAL_FRAMES,
+            wind_heading: 0.0,
         }
     }
 }

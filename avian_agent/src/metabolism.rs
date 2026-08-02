@@ -7,6 +7,8 @@ pub fn metabolism_system(
     world: &mut World,
     time: &SimulationTime,
     light_level: f64,
+    heat_mult: f64,
+    wind_flight_mult: f64,
 ) -> (f64, f64) {
     let dt = time.dt;
     let mut total_drained = 0.0;
@@ -27,7 +29,11 @@ pub fn metabolism_system(
         // 4.1 flight: while airborne the metabolic drain scales by
         // FLIGHT_MR_MULTIPLIER (≈7× BMR). The inline mirror in `run_systems`
         // applies the same helper so the energy-balance accounting stays exact.
-        let bmr_kj_s = meta.bmr_watts * calibration::flight_mr_multiplier(v_mag) / 1000.0;
+        // 4.4: heat scales BMR; wind scales the flight MR when airborne.
+        let flying = v_mag >= calibration::FLIGHT_SPEED_THRESHOLD_MS;
+        let wind_on_flight = if flying { wind_flight_mult } else { 1.0 };
+        let bmr_kj_s =
+            meta.bmr_watts * calibration::flight_mr_multiplier(v_mag) * heat_mult * wind_on_flight / 1000.0;
         let cot_kj_s = 0.0125 * mass_kg * v_mag;
 
         let drain = (bmr_kj_s + cot_kj_s) * dt * drain_factor;

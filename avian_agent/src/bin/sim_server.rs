@@ -17,6 +17,8 @@ fn main() {
     let headless = args.iter().any(|a| a == "--headless");
     // 4.3: opt-in urban map (buildings/trees/water + line-of-sight occlusion).
     let urban = args.iter().any(|a| a == "--urban");
+    // 4.4: opt-in stochastic weather scheduler (Clear/Rain/Wind/Heat).
+    let weather = args.iter().any(|a| a == "--weather");
     let frames_target: u64 = args.iter()
         .position(|a| a == "--frames")
         .and_then(|i| args.get(i + 1))
@@ -47,6 +49,7 @@ fn main() {
 
     let mut config = SimulationConfig::default();
     config.urban_obstacles = urban;
+    config.weather_enabled = weather;
     let mut sim = Simulation::new(seed, config);
     let mut exporter = TelemetryExporter::new(usize::MAX);
 

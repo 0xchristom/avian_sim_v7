@@ -43,10 +43,18 @@ pub fn collect_threats(sim: &Simulation) -> FxHashMap<Entity, Vector2<f64>> {
         sim.world.query::<(&Position, &Heading, &Vision, &Metabolism)>().iter()
     {
         let mut nearest: Option<(f64, Vector2<f64>)> = None;
+        // 4.4: rain shrinks the predator-detection range like every other
+        // vision path.
+        let detect_radius =
+            calibration::PREDATOR_DETECTION_RADIUS_M
+                * calibration::weather_vision_scale(
+                    sim.environment.weather,
+                    sim.environment.weather_intensity,
+                );
         for ppos in &predators {
             let offset = *ppos - pos.0;
             let dist = offset.norm();
-            if dist > calibration::PREDATOR_DETECTION_RADIUS_M || dist < 1e-6 {
+            if dist > detect_radius || dist < 1e-6 {
                 continue;
             }
             // FOV cone check (mirrors perception::cone_cast).
