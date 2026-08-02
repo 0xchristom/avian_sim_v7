@@ -12,8 +12,10 @@ use std::collections::HashSet;
 fn setup_predator_sim() -> Simulation {
     // predator_expiry off: a persistent predator keeps fleeing/capture under
     // test for the whole run (2.2b expiry has its own acceptance test).
+    // 6.2: fill_meals off too — the 3-meal despawn has its own test.
     let config = SimulationConfig {
         predator_expiry: false,
+        predator_fill_meals: false,
         ..SimulationConfig::default()
     };
     let mut sim = Simulation::new(99, config);

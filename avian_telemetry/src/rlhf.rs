@@ -176,6 +176,7 @@ mod tests {
             alarm_triggered: false,
             sick: false,
             vitality: 0.8,
+            memory: vec![],
         }
     }
 

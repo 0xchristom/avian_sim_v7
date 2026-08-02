@@ -160,6 +160,23 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     let mut agent_data_for_rl: Vec<RlExportData> = Vec::new();
     let mut to_despawn: Vec<Entity> = Vec::new();
 
+    // 6.1: spatial memory per entity for the viewer's fading memory dots. Built
+    // before the 15-component agent query (hecs tuple limit) as a side map.
+    let memory_by_entity: std::collections::HashMap<_, Vec<[f64; 3]>> = sim
+        .world
+        .query::<&MemorySlots>()
+        .iter()
+        .map(|(id, ms)| {
+            (
+                id,
+                ms.slots
+                    .iter()
+                    .map(|s| [s.pos.x, s.pos.y, s.strength])
+                    .collect(),
+            )
+        })
+        .collect();
+
     for (id, (pos, head, vel, meta, levy, fsm, mass, mobility, vision, head_bob, age, _phys_handle, uid, alarm, feather))
         in sim.world.query_mut::<(&mut Position, &mut Heading, &mut Velocity, &mut Metabolism, &mut LevyState,
             &mut FSMState, &Mass, &Mobility, &Vision, &mut HeadBob, &mut Age, &PhysicsHandle, &AgentUid, &mut Alarm, &mut FeatherCondition)>()
@@ -185,6 +202,8 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         let starved = meta.energy_kj <= 0.0;
         let old_age = age.vitality < 0.001;
         if starved || old_age || roll < death_prob {
+            // 6.2: record age at death for the survival-curve histogram.
+            sim.death_ages.push(age.years);
             to_despawn.push(id);
             continue;
         }
@@ -240,7 +259,7 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
             let dist = dir.norm();
             if dist > vision_range || dist < 1e-6 { return false; }
             let angle = dir.y.atan2(dir.x) - head.0;
-            let norm_ang = ((angle + std::f64::consts::PI) % (2.0 * std::f64::consts::PI)) - std::f64::consts::PI;
+            let norm_ang = crate::perception::normalize_angle_relative(angle);
             if norm_ang.abs() > vision.fov_degrees.to_radians() / 2.0 { return false; }
             // 4.3: hide grain behind a wall/building even inside the FOV cone.
             if physics
@@ -327,13 +346,19 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
             alarm_triggered: alarm.0,
             sick,
             vitality: age.vitality,
+            // 6.1: viewer memory dots — [x, y, strength] of remembered food.
+            memory: memory_by_entity.get(&id).cloned().unwrap_or_default(),
         };
-        agent_data_for_rl.push(RlExportData {
-            snap,
-            neighbor_pos: visible_neighbor_pos.clone(),
-            grain_pos: visible_grain_pos.clone(),
-            flock_count,
-        });
+        // 6.2: telemetry is opt-in; when the exporter is disabled (no `--output`
+        // server flag) skip collecting RL export data entirely.
+        if exporter.is_enabled() {
+            agent_data_for_rl.push(RlExportData {
+                snap,
+                neighbor_pos: visible_neighbor_pos.clone(),
+                grain_pos: visible_grain_pos.clone(),
+                flock_count,
+            });
+        }
     }
 
     // 3.2 flee-success tracking (separate pass — keeps the main loop query at
@@ -405,6 +430,8 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
                     meta.crop_count = (meta.crop_count + 1).min(meta.crop_max);
                     meta.energy_kj += calibration::GRAIN_ENERGY_KJ;
                     sim.total_energy_intake_kj += calibration::GRAIN_ENERGY_KJ;
+                    // 6.2: forage-success counter for the metrics dashboard.
+                    sim.grains_consumed += 1;
                     consumed_uids.push(uid.0.clone());
                     // 4.2 spatial memory: committing food to memory is coupled
                     // to finding it (within MEMORY_FOUND_DIST_M = consumption
@@ -501,16 +528,21 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     }
 
     // RLHF export: obs_v1 observation + 3.2 event-driven reward (sparse +
-    // shaped, per-second terms already scaled by dt).
-    let time_us = sim.time.time_us;
-    let frame = sim.time.frame;
-    let light_level = sim.environment.light_level;
+    // shaped, per-second terms already scaled by dt). Skipped entirely when
+    // telemetry is disabled (6.2: no `--output` server flag → no obs/reward
+    // work at all).
     let predator_positions: Vec<[f64; 2]> = sim
         .world
         .query::<(&Position, &Predator)>()
         .iter()
         .map(|(_, (p, _))| [p.0.x, p.0.y])
         .collect();
+    if !exporter.is_enabled() {
+        return;
+    }
+    let time_us = sim.time.time_us;
+    let frame = sim.time.frame;
+    let light_level = sim.environment.light_level;
     for data in agent_data_for_rl {
         let obs = state_to_observation(&data.snap, &data.neighbor_pos, &data.grain_pos, &predator_positions, light_level);
         let grain_eaten = consumed_uids.iter().any(|u| u == &data.snap.uid);

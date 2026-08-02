@@ -142,6 +142,18 @@ impl Default for EnvironmentState {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AgentUid(pub String);
 
+/// 6.2: predator hunt-state machine — the dynamic speed scale 1-5 (await slow,
+/// chase ramps to very fast) with a 1-second busy beat after a strike/miss.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PredatorHuntState {
+    /// No prey inside the detection radius — slow patrol (speed level 1).
+    Await,
+    /// Prey detected — pursues at a speed level that ramps toward 5.
+    Chase,
+    /// Just struck (capture or miss) — halted "busy" for `PREDATOR_CATCH_BUSY_S`.
+    Catch,
+}
+
 /// 2.2 predator entity — a bespoke pursuit script, NOT a BTNode.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Predator {
@@ -155,6 +167,15 @@ pub struct Predator {
     /// `[PREDATOR_LIFETIME_MIN_S, PREDATOR_LIFETIME_MAX_S]` at spawn; when it
     /// reaches 0 the entity is removed and `RemovePredator` is logged.
     pub lifetime_remaining_s: f64,
+    /// 6.2: captures eaten so far; at `predator_fill_meals_target` (when
+    /// `predator_fill_meals` is enabled) the predator despawns satisfied.
+    pub meals_eaten: u32,
+    /// 6.2: current hunt-state machine state.
+    pub hunt_state: PredatorHuntState,
+    /// 6.2: current dynamic speed tier on the 1 (slow)..5 (very fast) scale.
+    pub speed_level: u8,
+    /// 6.2: seconds left in the `Catch` busy beat (0 when not catching).
+    pub hunt_timer_s: f64,
 }
 
 /// 4.2 spatial memory: remembered food locations with decaying strength.

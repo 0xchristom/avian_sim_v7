@@ -1,11 +1,29 @@
 import * as THREE from 'three';
 
+// 6.5: FSM → accent color (same mapping as the Dashboard compact cards).
+const FSM_COLORS: Record<string, number> = {
+  Idle: 0xaaaaaa,
+  Foraging: 0x00ff00,
+  Fleeing: 0xff2222,
+  Scanning: 0x00e5ff,
+  Spacer: 0x888888,
+  Preening: 0x00e5ff,
+  Sick: 0xcc44ff,
+};
+
+// 6.5: morph variants — gray / brown feral / white, chosen per-agent from the UID.
+const MORPH_COLORS = [0x9a9aa0, 0x8a6a4a, 0xe0e0e0];
+
 export class WebGLRenderer {
   private scene: THREE.Scene;
   private camera: THREE.OrthographicCamera;
   private renderer: THREE.WebGLRenderer;
   private birdBodyMesh: THREE.InstancedMesh;
   private birdHeadMesh: THREE.InstancedMesh;
+  private birdWingLMesh: THREE.InstancedMesh;
+  private birdWingRMesh: THREE.InstancedMesh;
+  private birdShadowMesh: THREE.InstancedMesh;
+  private stateRingMesh: THREE.InstancedMesh;
   private grainMesh: THREE.InstancedMesh;
   private predatorMesh: THREE.InstancedMesh;
   private nightOverlay: THREE.Mesh;
@@ -13,6 +31,79 @@ export class WebGLRenderer {
   private obstacleGroup: THREE.Group;
   private predatorLabels: THREE.Sprite[] = [];
   private selectionMarkers: THREE.Mesh[] = [];
+  // 6.1: FOV cone pool — one mesh per hovered/selected agent, reused (no per-frame GC).
+  private fovCones: THREE.Mesh[] = [];
+  private fovConeGeom: THREE.ShapeGeometry;
+  private fovConeMat: THREE.MeshBasicMaterial;
+  // 6.1: flock viz — line segments between agents within the flock radius.
+  private neighborLines: THREE.LineSegments;
+  private neighborGeom: THREE.BufferGeometry;
+  // 6.1: memory dots — instanced fading dots at remembered food locations.
+  private memoryDots: THREE.InstancedMesh;
+  // 6.4: viewport camera — zoom (scale factor) + center pan (world units).
+  private viewZoom = 1;
+  private viewCenter = { x: 16, y: 10.5 };
+  // 6.5: animation clock (seconds) for wing flap + peck pulses.
+  private animTime = 0;
+  private lastFrameMs = performance.now();
+  // 6.6: pooled dummy objects — created once, reused every frame (zero
+  // `new Object3D` during render).
+  private dummyBody = new THREE.Object3D();
+  private dummyHead = new THREE.Object3D();
+  private dummyWingL = new THREE.Object3D();
+  private dummyWingR = new THREE.Object3D();
+  private dummyShadow = new THREE.Object3D();
+  private dummyRing = new THREE.Object3D();
+  private dummyGrain = new THREE.Object3D();
+  private dummyPred = new THREE.Object3D();
+  private scratchColor = new THREE.Color();
+  // 6.6: dirty-flag cache — only recompute an instance matrix when
+  // pos/heading/mass/head actually changed since the last snapshot.
+  private agentCache = new Map<string, { pos: [number, number]; heading: number; mass: number; bob: [number, number]; fsm: string }>();
+  private grainCache = new Map<string, [number, number]>();
+  private predCache = new Map<string, [number, number]>();
+
+  // Visual constants (renderer-only; ground truth lives in calibration.rs).
+  private static readonly FOV_CONE_RADIUS = 3.0;
+  private static readonly FOV_CONE_OPACITY = 0.15;
+  private static readonly FLOCK_LINE_RADIUS = 3.0;
+  private static readonly MEMORY_DOT_CAPACITY = 500;
+  private static readonly WORLD_W = 32;
+  private static readonly WORLD_H = 21;
+  private static readonly INSTANCE_CAPACITY = 2000;
+  // 6.5: wing flap — amplitude scales with speed, near-zero when idle (tucked).
+  private static readonly FLAP_MIN_SPEED_MS = 0.3;
+  private static readonly FLAP_FREQ_BASE = 4.0;
+  private static readonly FLAP_FREQ_PER_SPEED = 4.0;
+  // 6.5: peck — reuse the HeadBobSystem jerk curve, longer thrust near grain.
+  private static readonly PECK_NEAR_GRAIN_M = 0.9;
+  private static readonly PECK_EXTRA_M = 0.16;
+  private static readonly PECK_FREQ_HZ = 4.0;
+
+  // 6.5: teardrop body (rounded front + pointed tail), pointing +X.
+  private static buildTeardropGeometry(): THREE.ShapeGeometry {
+    const s = new THREE.Shape();
+    s.moveTo(0.35, 0);
+    s.quadraticCurveTo(0.45, 0.18, 0.25, 0.28);
+    s.quadraticCurveTo(0.0, 0.36, -0.2, 0.22);
+    s.quadraticCurveTo(-0.3, 0.1, -0.35, 0.05);
+    s.quadraticCurveTo(-0.42, 0.0, -0.35, -0.05);
+    s.quadraticCurveTo(-0.3, -0.1, -0.2, -0.22);
+    s.quadraticCurveTo(0.0, -0.36, 0.25, -0.28);
+    s.quadraticCurveTo(0.45, -0.18, 0.35, 0);
+    return new THREE.ShapeGeometry(s);
+  }
+
+  // 6.5: small leaf wing anchored at the body, sweeping in z to "flap".
+  private static buildWingGeometry(): THREE.ShapeGeometry {
+    const s = new THREE.Shape();
+    s.moveTo(0, 0);
+    s.lineTo(0.3, 0.1);
+    s.lineTo(0.32, 0);
+    s.lineTo(0.3, -0.1);
+    s.closePath();
+    return new THREE.ShapeGeometry(s);
+  }
 
   constructor(canvas: HTMLCanvasElement) {
     this.scene = new THREE.Scene();
@@ -28,22 +119,55 @@ export class WebGLRenderer {
     grid.position.set(16, 10.5, -1);
     this.scene.add(grid);
 
-    const bodyGeom = new THREE.CircleGeometry(0.4, 16);
+    // 6.5: per-agent ground shadow (soft dark ellipse, slightly larger than body).
+    const shadowGeom = new THREE.CircleGeometry(0.46, 20);
+    const shadowMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.32, depthTest: false });
+    this.birdShadowMesh = new THREE.InstancedMesh(shadowGeom, shadowMat, WebGLRenderer.INSTANCE_CAPACITY);
+    this.birdShadowMesh.frustumCulled = false;
+    this.birdShadowMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.scene.add(this.birdShadowMesh);
+
+    // 6.5: teardrop body (rounded + pointed tail) instead of a plain circle.
+    const bodyGeom = WebGLRenderer.buildTeardropGeometry();
     const bodyMat = new THREE.MeshBasicMaterial({ color: 0xff6c0c });
-    this.birdBodyMesh = new THREE.InstancedMesh(bodyGeom, bodyMat, 1000);
+    this.birdBodyMesh = new THREE.InstancedMesh(bodyGeom, bodyMat, WebGLRenderer.INSTANCE_CAPACITY);
     this.birdBodyMesh.frustumCulled = false;
+    this.birdBodyMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.scene.add(this.birdBodyMesh);
 
-    const headGeom = new THREE.CircleGeometry(0.15, 16);
+    // 6.5: head — small shape offset forward, carrying head-bob + peck thrust.
+    const headGeom = new THREE.CircleGeometry(0.13, 16);
     const headMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-    this.birdHeadMesh = new THREE.InstancedMesh(headGeom, headMat, 1000);
+    this.birdHeadMesh = new THREE.InstancedMesh(headGeom, headMat, WebGLRenderer.INSTANCE_CAPACITY);
     this.birdHeadMesh.frustumCulled = false;
+    this.birdHeadMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.scene.add(this.birdHeadMesh);
+
+    // 6.5: two wings — flap amplitude scales with speed, tucked when idle.
+    const wingGeom = WebGLRenderer.buildWingGeometry();
+    const wingMat = new THREE.MeshBasicMaterial({ color: 0xd8d8d8 });
+    this.birdWingLMesh = new THREE.InstancedMesh(wingGeom, wingMat, WebGLRenderer.INSTANCE_CAPACITY);
+    this.birdWingLMesh.frustumCulled = false;
+    this.birdWingLMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.scene.add(this.birdWingLMesh);
+    this.birdWingRMesh = new THREE.InstancedMesh(wingGeom, wingMat.clone(), WebGLRenderer.INSTANCE_CAPACITY);
+    this.birdWingRMesh.frustumCulled = false;
+    this.birdWingRMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.scene.add(this.birdWingRMesh);
+
+    // 6.5: FSM state ring — thin outline under each bird, colored by state.
+    const ringGeom = new THREE.RingGeometry(0.52, 0.62, 24);
+    const ringMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.55, depthTest: false, side: THREE.DoubleSide });
+    this.stateRingMesh = new THREE.InstancedMesh(ringGeom, ringMat, WebGLRenderer.INSTANCE_CAPACITY);
+    this.stateRingMesh.frustumCulled = false;
+    this.stateRingMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.scene.add(this.stateRingMesh);
 
     const grainGeom = new THREE.CircleGeometry(0.2, 8);
     const grainMat = new THREE.MeshBasicMaterial({ color: 0xffff00 });
-    this.grainMesh = new THREE.InstancedMesh(grainGeom, grainMat, 1000);
+    this.grainMesh = new THREE.InstancedMesh(grainGeom, grainMat, WebGLRenderer.INSTANCE_CAPACITY);
     this.grainMesh.frustumCulled = false;
+    this.grainMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.scene.add(this.grainMesh);
 
     // 2.2: predators rendered as larger red triangles (hawk).
@@ -51,6 +175,7 @@ export class WebGLRenderer {
     const predMat = new THREE.MeshBasicMaterial({ color: 0xff2222 });
     this.predatorMesh = new THREE.InstancedMesh(predGeom, predMat, 64);
     this.predatorMesh.frustumCulled = false;
+    this.predatorMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.scene.add(this.predatorMesh);
 
     // 2.3: black full-screen overlay; opacity = 1 - light_level → dims at night.
@@ -80,42 +205,278 @@ export class WebGLRenderer {
     // 4.3: static urban obstacles (buildings/trees/water), rebuilt per frame.
     this.obstacleGroup = new THREE.Group();
     this.scene.add(this.obstacleGroup);
+
+    // 6.1: FOV cone geometry — a wedge spanning ±VISION_FOV_DEGREES/2 about the
+    // +X axis (agent heading). Built once, shared by the cone pool meshes.
+    const fovHalf = (340.0 / 2) * (Math.PI / 180);
+    const coneShape = new THREE.Shape();
+    coneShape.moveTo(0, 0);
+    coneShape.absarc(0, 0, WebGLRenderer.FOV_CONE_RADIUS, -fovHalf, fovHalf, false);
+    coneShape.lineTo(0, 0);
+    this.fovConeGeom = new THREE.ShapeGeometry(coneShape);
+    this.fovConeMat = new THREE.MeshBasicMaterial({
+      color: 0x00ffcc,
+      transparent: true,
+      opacity: WebGLRenderer.FOV_CONE_OPACITY,
+      depthTest: false,
+      side: THREE.DoubleSide,
+    });
+
+    // 6.1: flock neighbor connection lines. One dynamic buffer; capacity grows
+    // only when more segments than the current allocation are needed.
+    this.neighborGeom = new THREE.BufferGeometry();
+    this.neighborLines = new THREE.LineSegments(
+      this.neighborGeom,
+      new THREE.LineBasicMaterial({ color: 0x00ffcc, transparent: true, opacity: 0.35, depthTest: false }),
+    );
+    this.neighborLines.renderOrder = 6;
+    this.scene.add(this.neighborLines);
+
+    // 6.1: memory dots (remembered food) — instanced small dots, scale + color
+    // fade with memory strength.
+    const dotGeom = new THREE.CircleGeometry(0.08, 8);
+    const dotMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, depthTest: false });
+    this.memoryDots = new THREE.InstancedMesh(dotGeom, dotMat, WebGLRenderer.MEMORY_DOT_CAPACITY);
+    this.memoryDots.frustumCulled = false;
+    this.memoryDots.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.memoryDots.renderOrder = 7;
+    this.scene.add(this.memoryDots);
   }
 
-  render(snapshot: any, selectedUids: string[] = []) {
+  // 6.4: zoom to a factor centered on `cx, cy` (world units), clamped.
+  setZoom(zoom: number, cx?: number, cy?: number) {
+    const z = Math.min(10, Math.max(1, zoom));
+    if (typeof cx === 'number' && typeof cy === 'number') {
+      this.viewCenter.x = cx;
+      this.viewCenter.y = cy;
+    }
+    this.viewZoom = z;
+    this.applyCamera();
+  }
+
+  // 6.4: pan the view center by a world-space delta (drag-to-pan).
+  panBy(dx: number, dy: number) {
+    this.viewCenter.x = Math.min(WebGLRenderer.WORLD_W, Math.max(0, this.viewCenter.x + dx));
+    this.viewCenter.y = Math.min(WebGLRenderer.WORLD_H, Math.max(0, this.viewCenter.y + dy));
+    this.applyCamera();
+  }
+
+  // 6.4: reset to the full-arena view.
+  resetView() {
+    this.viewZoom = 1;
+    this.viewCenter.x = WebGLRenderer.WORLD_W / 2;
+    this.viewCenter.y = WebGLRenderer.WORLD_H / 2;
+    this.applyCamera();
+  }
+
+  // 6.4: convert a mouse pixel (relative to the canvas) to world coordinates.
+  screenToWorld(px: number, py: number, canvasW: number, canvasH: number): { x: number; y: number } {
+    const halfW = WebGLRenderer.WORLD_W / (2 * this.viewZoom);
+    const halfH = WebGLRenderer.WORLD_H / (2 * this.viewZoom);
+    const worldX = this.viewCenter.x + ((px / canvasW) - 0.5) * 2 * halfW;
+    const worldY = this.viewCenter.y - ((py / canvasH) - 0.5) * 2 * halfH;
+    return { x: worldX, y: worldY };
+  }
+
+  // 6.4: expose the current zoom factor (for pan-speed scaling in the app).
+  viewZoomRef(): number {
+    return this.viewZoom;
+  }
+
+  private applyCamera() {
+    const halfW = WebGLRenderer.WORLD_W / (2 * this.viewZoom);
+    const halfH = WebGLRenderer.WORLD_H / (2 * this.viewZoom);
+    this.camera.left = this.viewCenter.x - halfW;
+    this.camera.right = this.viewCenter.x + halfW;
+    this.camera.top = this.viewCenter.y + halfH;
+    this.camera.bottom = this.viewCenter.y - halfH;
+    this.camera.updateProjectionMatrix();
+  }
+
+  // 6.6: grow an instanced mesh's buffers when it needs more instances than
+  // the initial capacity. Keeps `count` within capacity so Three never drops
+  // instances silently at high agent counts.
+  private ensureCapacity(mesh: THREE.InstancedMesh, needed: number) {
+    if (needed <= mesh.count) return;
+    const capacity = Math.max(needed, mesh.instanceMatrix.count * 2);
+    const newMatrices = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 16), 16);
+    if (mesh.instanceMatrix.array) {
+      (newMatrices.array as Float32Array).set(mesh.instanceMatrix.array as Float32Array);
+    }
+    mesh.instanceMatrix = newMatrices;
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    // Instance colors (morph/FSM tints) must grow too or setColorAt is dropped.
+    if (mesh.instanceColor) {
+      const old = mesh.instanceColor as THREE.InstancedBufferAttribute;
+      const newColors = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
+      (newColors.array as Float32Array).set(old.array as Float32Array);
+      mesh.instanceColor = newColors;
+    }
+    mesh.count = capacity;
+  }
+
+  render(snapshot: any, selectedUids: string[] = [], hoveredUid?: string) {
     if (!snapshot || !snapshot.agents) return;
 
-    const dummyBody = new THREE.Object3D();
-    const dummyHead = new THREE.Object3D();
-    const dummyGrain = new THREE.Object3D();
-    const dummyPred = new THREE.Object3D();
+    // 6.5: advance the animation clock at real time (wings/peck pulse).
+    const now = performance.now();
+    this.animTime += Math.min(0.05, (now - this.lastFrameMs) / 1000);
+    this.lastFrameMs = now;
+    const t = this.animTime;
+
+    // 6.6: grow instance capacity once (if the population exceeded the pool).
+    const n = snapshot.agents.length;
+    this.ensureCapacity(this.birdShadowMesh, n);
+    this.ensureCapacity(this.birdBodyMesh, n);
+    this.ensureCapacity(this.birdHeadMesh, n);
+    this.ensureCapacity(this.birdWingLMesh, n);
+    this.ensureCapacity(this.birdWingRMesh, n);
+    this.ensureCapacity(this.stateRingMesh, n);
+    this.ensureCapacity(this.grainMesh, snapshot.grains ? snapshot.grains.length : 0);
+
+    const dummyBody = this.dummyBody;
+    const dummyHead = this.dummyHead;
+    const dummyWingL = this.dummyWingL;
+    const dummyWingR = this.dummyWingR;
+    const dummyShadow = this.dummyShadow;
+    const dummyRing = this.dummyRing;
+    const dummyGrain = this.dummyGrain;
+    const dummyPred = this.dummyPred;
+    const bodyColor = this.scratchColor;
+
+    // 6.5: nearest-grain distance per agent (for the peck trigger).
+    const grains = snapshot.grains || [];
 
     snapshot.agents.forEach((agent: any, i: number) => {
       const angle = agent.heading;
-      const massScale = agent.mass_g ? agent.mass_g / 315.0 : 1.0;
+      const mass = agent.mass_g ? agent.mass_g / 315.0 : 1.0;
+      const bob = agent.head_offset || [0, 0];
+      // 6.6: dirty-flag — static bones (body/shadow/ring) skip matrix + color
+      // recompute when nothing moved/changed. Wings + head are always updated
+      // because they carry the time-based flap/peck animation.
+      const fsm = agent.fsm_state || 'Idle';
+      const cached = this.agentCache.get(agent.uid);
+      const dirty = !cached
+        || cached.pos[0] !== agent.pos[0] || cached.pos[1] !== agent.pos[1]
+        || cached.heading !== angle || cached.mass !== mass
+        || cached.bob[0] !== bob[0] || cached.bob[1] !== bob[1]
+        || cached.fsm !== fsm;
+      if (dirty) {
+        this.agentCache.set(agent.uid, { pos: [agent.pos[0], agent.pos[1]], heading: angle, mass, bob: [bob[0], bob[1]], fsm });
 
-      dummyBody.position.set(agent.pos[0], agent.pos[1], 0);
-      dummyBody.rotation.z = angle;
-      dummyBody.scale.set(1.0 * massScale, 0.6 * massScale, 1.0);
-      dummyBody.updateMatrix();
-      this.birdBodyMesh.setMatrixAt(i, dummyBody.matrix);
+        // Shadow under the bird (fixed size scaled by mass).
+        dummyShadow.position.set(agent.pos[0], agent.pos[1], 0.02);
+        dummyShadow.scale.set(mass, mass, 1);
+        dummyShadow.updateMatrix();
+        this.birdShadowMesh.setMatrixAt(i, dummyShadow.matrix);
 
-      const headX = agent.pos[0] + Math.cos(angle) * 0.45 + (agent.head_offset ? agent.head_offset[0] : 0);
-      const headY = agent.pos[1] + Math.sin(angle) * 0.45 + (agent.head_offset ? agent.head_offset[1] : 0);
-      dummyHead.position.set(headX, headY, 0.1);
+        // Teardrop body, rotated to heading, scaled by mass.
+        dummyBody.position.set(agent.pos[0], agent.pos[1], 0.08);
+        dummyBody.rotation.z = angle;
+        dummyBody.scale.set(1.0 * mass, 1.0 * mass, 1.0);
+        dummyBody.updateMatrix();
+        this.birdBodyMesh.setMatrixAt(i, dummyBody.matrix);
+        // 6.5: per-instance morph color (gray/brown/white from UID hash).
+        const hash = agent.uid.split('').reduce((acc: number, c: string) => acc + c.charCodeAt(0), 0);
+        bodyColor.setHex(MORPH_COLORS[hash % MORPH_COLORS.length]);
+        this.birdBodyMesh.setColorAt(i, bodyColor);
+
+        // 6.5: FSM state ring under the bird.
+        dummyRing.position.set(agent.pos[0], agent.pos[1], 0.04);
+        dummyRing.scale.set(mass, mass, 1);
+        dummyRing.updateMatrix();
+        this.stateRingMesh.setMatrixAt(i, dummyRing.matrix);
+        this.stateRingMesh.setColorAt(i, bodyColor.setHex(FSM_COLORS[fsm] ?? 0x888888));
+      }
+
+      const v = agent.vel ? Math.hypot(agent.vel[0], agent.vel[1]) : 0;
+
+      // 6.5: wings — flap sweeps fore/aft, amplitude scales with speed (tucked
+      // when idle). Left wing flaps opposite the right.
+      const flapAmp = v > WebGLRenderer.FLAP_MIN_SPEED_MS
+        ? Math.min(0.55, 0.15 + v * 0.25)
+        : 0.03;
+      const flapFreq = WebGLRenderer.FLAP_FREQ_BASE + v * WebGLRenderer.FLAP_FREQ_PER_SPEED;
+      const flapPhase = Math.sin(t * flapFreq * Math.PI * 2) * flapAmp;
+
+      const cosA = Math.cos(angle);
+      const sinA = Math.sin(angle);
+      // Left wing pivots at (0.05, +0.12) rotated by heading; sweep by -flapPhase.
+      const lx = agent.pos[0] + cosA * 0.05 - sinA * 0.12;
+      const ly = agent.pos[1] + sinA * 0.05 + cosA * 0.12;
+      dummyWingL.position.set(lx, ly, 0.1);
+      dummyWingL.rotation.z = angle - flapPhase;
+      dummyWingL.scale.set(mass, mass, 1);
+      dummyWingL.updateMatrix();
+      this.birdWingLMesh.setMatrixAt(i, dummyWingL.matrix);
+
+      const rx = agent.pos[0] + cosA * 0.05 + sinA * 0.12;
+      const ry = agent.pos[1] + sinA * 0.05 - cosA * 0.12;
+      dummyWingR.position.set(rx, ry, 0.1);
+      dummyWingR.rotation.z = angle + flapPhase;
+      dummyWingR.scale.set(mass, mass, 1);
+      dummyWingR.updateMatrix();
+      this.birdWingRMesh.setMatrixAt(i, dummyWingR.matrix);
+
+      // 6.5: head — forward offset + head-bob offset + peck thrust. Peck reuses
+      // the HeadBobSystem jerk curve (10t³-15t⁴+6t⁵) as a longer forward thrust
+      // when foraging near a grain.
+      let headFwd = 0.45;
+      let peckThrust = 0;
+      if (fsm === 'Foraging' && Array.isArray(grains) && grains.length > 0) {
+        let nearest = Infinity;
+        for (const g of grains) {
+          const dx = g[0] - agent.pos[0];
+          const dy = g[1] - agent.pos[1];
+          const d2 = dx * dx + dy * dy;
+          if (d2 < nearest) nearest = d2;
+        }
+        if (nearest < WebGLRenderer.PECK_NEAR_GRAIN_M * WebGLRenderer.PECK_NEAR_GRAIN_M) {
+          const pt = (t * WebGLRenderer.PECK_FREQ_HZ) % 1.0;
+          const jerk = 10 * pt ** 3 - 15 * pt ** 4 + 6 * pt ** 5;
+          peckThrust = WebGLRenderer.PECK_EXTRA_M * jerk;
+        }
+      }
+      headFwd += peckThrust;
+      const headX = agent.pos[0] + cosA * headFwd + bob[0];
+      const headY = agent.pos[1] + sinA * headFwd + bob[1];
+      dummyHead.position.set(headX, headY, 0.18);
       dummyHead.rotation.z = angle;
-      dummyHead.scale.set(1, 1, 1);
+      dummyHead.scale.set(1.2 * mass, 1.2 * mass, 1);
       dummyHead.updateMatrix();
       this.birdHeadMesh.setMatrixAt(i, dummyHead.matrix);
     });
 
-    this.birdBodyMesh.count = snapshot.agents.length;
-    this.birdHeadMesh.count = snapshot.agents.length;
+    // 6.6: prune cache entries for agents that left the sim (stale UIDs).
+    if (this.agentCache.size > n) {
+      const live = new Set(snapshot.agents.map((a: any) => a.uid));
+      for (const uid of this.agentCache.keys()) {
+        if (!live.has(uid)) this.agentCache.delete(uid);
+      }
+    }
+
+    this.birdBodyMesh.count = n;
+    this.birdHeadMesh.count = n;
+    this.birdWingLMesh.count = n;
+    this.birdWingRMesh.count = n;
+    this.birdShadowMesh.count = n;
+    this.stateRingMesh.count = n;
     this.birdBodyMesh.instanceMatrix.needsUpdate = true;
     this.birdHeadMesh.instanceMatrix.needsUpdate = true;
+    this.birdWingLMesh.instanceMatrix.needsUpdate = true;
+    this.birdWingRMesh.instanceMatrix.needsUpdate = true;
+    this.birdShadowMesh.instanceMatrix.needsUpdate = true;
+    this.stateRingMesh.instanceMatrix.needsUpdate = true;
+    if (this.birdBodyMesh.instanceColor) this.birdBodyMesh.instanceColor.needsUpdate = true;
+    if (this.stateRingMesh.instanceColor) this.stateRingMesh.instanceColor.needsUpdate = true;
 
     if (snapshot.grains) {
       snapshot.grains.forEach((g: any, i: number) => {
+        // 6.6: skip unchanged grains (dirty-flag per grain id).
+        const key = `${g[0].toFixed(4)},${g[1].toFixed(4)}`;
+        const cachedGrain = this.grainCache.get(key);
+        if (cachedGrain && cachedGrain[0] === g[0] && cachedGrain[1] === g[1]) return;
+        this.grainCache.set(key, [g[0], g[1]]);
         dummyGrain.position.set(g[0], g[1], 0);
         dummyGrain.scale.set(1, 1, 1);
         dummyGrain.updateMatrix();
@@ -123,10 +484,16 @@ export class WebGLRenderer {
       });
       this.grainMesh.count = snapshot.grains.length;
       this.grainMesh.instanceMatrix.needsUpdate = true;
+      if (this.grainCache.size > snapshot.grains.length * 2) {
+        this.grainCache.clear();
+      }
     }
 
     if (snapshot.predators) {
       snapshot.predators.forEach((p: any, i: number) => {
+        const cachedPred = this.predCache.get(p.uid);
+        if (cachedPred && cachedPred[0] === p.pos[0] && cachedPred[1] === p.pos[1]) return;
+        this.predCache.set(p.uid, [p.pos[0], p.pos[1]]);
         dummyPred.position.set(p.pos[0], p.pos[1], 0.2);
         dummyPred.scale.set(1, 1, 1);
         dummyPred.updateMatrix();
@@ -142,8 +509,17 @@ export class WebGLRenderer {
     // 4.3: draw the static urban obstacles.
     this.updateObstacles(snapshot.obstacles || []);
 
+    // 6.1: flock neighbor connection lines between nearby agents.
+    this.updateNeighborLines(snapshot.agents || []);
+
+    // 6.1: memory dots — remembered food as fading dots per agent.
+    this.updateMemoryDots(snapshot.agents || []);
+
     // Marking tool: green ring around every selected agent/predator.
     this.updateSelectionMarkers(snapshot, selectedUids);
+
+    // 6.1: FOV cone for the hovered + selected agents (agent head direction).
+    this.updateFovCones(snapshot.agents || [], selectedUids, hoveredUid);
 
     // 2.3: dim toward night — light_level 1.0 (noon) → overlay 0, 0.1 → 0.9.
     if (typeof snapshot.light_level === 'number') {
@@ -155,6 +531,92 @@ export class WebGLRenderer {
     this.updateWeatherOverlay(snapshot.weather, snapshot.weather_intensity);
 
     this.renderer.render(this.scene, this.camera);
+  }
+
+  // 6.1: draw line segments between every agent pair within the flock radius.
+  // O(n²) at 30 agents is trivial (≤ 435 pairs); fine for the research view.
+  private updateNeighborLines(agents: any[]) {
+    const pairs: number[] = [];
+    const r = WebGLRenderer.FLOCK_LINE_RADIUS;
+    for (let i = 0; i < agents.length; i++) {
+      const a = agents[i];
+      for (let j = i + 1; j < agents.length; j++) {
+        const b = agents[j];
+        const dx = a.pos[0] - b.pos[0];
+        const dy = a.pos[1] - b.pos[1];
+        if (dx * dx + dy * dy <= r * r) {
+          pairs.push(a.pos[0], a.pos[1], 0.25, b.pos[0], b.pos[1], 0.25);
+        }
+      }
+    }
+    const count = pairs.length / 3;
+    let attr = this.neighborGeom.getAttribute('position') as THREE.BufferAttribute;
+    if (!attr || attr.count < count) {
+      const capacity = Math.max(count * 3, 3);
+      attr = new THREE.BufferAttribute(new Float32Array(capacity), 3);
+      this.neighborGeom.setAttribute('position', attr);
+    }
+    if (count > 0) {
+      (attr.array as Float32Array).set(pairs);
+    }
+    attr.needsUpdate = true;
+    this.neighborGeom.setDrawRange(0, count);
+    this.neighborLines.frustumCulled = false;
+  }
+
+  // 6.1: remembered food dots. Each agent's `memory` is [[x, y, strength]];
+  // scale + brightness fade with strength so aging memories dim to nothing.
+  private updateMemoryDots(agents: any[]) {
+    const dummy = this.dummyShadow; // 6.6: reuse a pooled dummy (zero allocs).
+    const dotColor = this.scratchColor;
+    let index = 0;
+    agents.forEach((a) => {
+      if (!Array.isArray(a.memory)) return;
+      a.memory.forEach((slot: [number, number, number]) => {
+        const strength = Math.max(0, Math.min(1, slot[2]));
+        if (strength <= 0.02) return;
+        dummy.position.set(slot[0], slot[1], 0.3);
+        const s = 0.6 + 1.4 * strength;
+        dummy.scale.set(s, s, s);
+        dummy.updateMatrix();
+        this.memoryDots.setMatrixAt(index, dummy.matrix);
+        dotColor.setRGB(1.0, 0.42 + 0.4 * strength, 0.05 * strength);
+        this.memoryDots.setColorAt(index, dotColor);
+        index++;
+      });
+    });
+    this.memoryDots.count = index;
+    this.memoryDots.instanceMatrix.needsUpdate = true;
+    if (this.memoryDots.instanceColor) this.memoryDots.instanceColor.needsUpdate = true;
+  }
+
+  // 6.1: FOV cone for the hovered agent + every selected agent. The cone is a
+  // 340°-wide wedge (pigeon vision) drawn as a flat fan on the ground plane,
+  // rotated to the agent's heading.
+  private updateFovCones(agents: any[], selectedUids: string[], hoveredUid?: string) {
+    const targets = new Set<string>();
+    if (hoveredUid) targets.add(hoveredUid);
+    selectedUids.forEach((u) => targets.add(u));
+
+    const coneAgents = agents.filter((a) => targets.has(a.uid));
+
+    while (this.fovCones.length < coneAgents.length) {
+      const mesh = new THREE.Mesh(this.fovConeGeom, this.fovConeMat);
+      mesh.renderOrder = 6;
+      this.scene.add(mesh);
+      this.fovCones.push(mesh);
+    }
+    for (let i = 0; i < this.fovCones.length; i++) {
+      const mesh = this.fovCones[i];
+      if (i < coneAgents.length) {
+        const a = coneAgents[i];
+        mesh.visible = true;
+        mesh.position.set(a.pos[0], a.pos[1], 0.28);
+        mesh.rotation.z = a.heading;
+      } else {
+        mesh.visible = false;
+      }
+    }
   }
 
   private updateWeatherOverlay(weather: string, intensity: number) {

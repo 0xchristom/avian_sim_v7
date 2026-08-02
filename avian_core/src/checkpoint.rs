@@ -277,6 +277,10 @@ pub struct Checkpoint {
     pub next_uid: u64,
     pub deaths: u32,
     pub predator_kills: u32,
+    /// 6.2: cumulative grains eaten + age-at-death list for the metrics
+    /// dashboard (forage success rate, survival curve).
+    pub grains_consumed: u64,
+    pub death_ages: Vec<f64>,
     pub events_log: Vec<(u32, Event)>,
     pub total_energy_intake_kj: f64,
     pub total_energy_expenditure_kj: f64,
@@ -288,7 +292,7 @@ pub struct Checkpoint {
     pub world_bytes: Vec<u8>,
 }
 
-pub const CHECKPOINT_VERSION: u32 = 2;
+pub const CHECKPOINT_VERSION: u32 = 3;
 
 /// Serialize the world column into a `Vec<u8>` via bincode.
 pub fn serialize_world(world: &World) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -322,6 +326,8 @@ pub fn build_checkpoint(sim: &crate::Simulation) -> Result<Checkpoint, Box<dyn s
         next_uid: sim.next_uid,
         deaths: sim.deaths,
         predator_kills: sim.predator_kills,
+        grains_consumed: sim.grains_consumed,
+        death_ages: sim.death_ages.clone(),
         events_log: sim.events_log.clone(),
         total_energy_intake_kj: sim.total_energy_intake_kj,
         total_energy_expenditure_kj: sim.total_energy_expenditure_kj,

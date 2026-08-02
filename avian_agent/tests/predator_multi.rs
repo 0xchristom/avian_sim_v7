@@ -10,7 +10,7 @@ use nalgebra::Vector2;
 
 #[test]
 fn multiple_predators_all_move() {
-    let config = SimulationConfig { predator_expiry: false, ..SimulationConfig::default() };
+    let config = SimulationConfig { predator_expiry: false, predator_fill_meals: false, ..SimulationConfig::default() };
     let mut sim = Simulation::new(7, config);
 
     // Two predators far apart, no agents — both should PATROL.

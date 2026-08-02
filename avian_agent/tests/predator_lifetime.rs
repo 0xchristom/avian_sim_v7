@@ -10,7 +10,15 @@ use nalgebra::Vector2;
 
 #[test]
 fn test_predator_expires_within_5_15s_and_logs_event() {
-    let mut sim = Simulation::new(42, SimulationConfig::default());
+    // 6.2: fill_meals off — this test isolates the LIFETIME expiry path (the
+    // 3-meal despawn has its own acceptance test).
+    let mut sim = Simulation::new(
+        42,
+        SimulationConfig {
+            predator_fill_meals: false,
+            ..SimulationConfig::default()
+        },
+    );
     sim.spawn_predator(Vector2::new(16.0, 10.5));
     let mut exporter = TelemetryExporter::new(usize::MAX);
 
@@ -41,7 +49,13 @@ fn test_predator_expires_within_5_15s_and_logs_event() {
 
 #[test]
 fn test_predator_lifetime_visible_in_snapshot() {
-    let mut sim = Simulation::new(7, SimulationConfig::default());
+    let mut sim = Simulation::new(
+        7,
+        SimulationConfig {
+            predator_fill_meals: false,
+            ..SimulationConfig::default()
+        },
+    );
     sim.spawn_predator(Vector2::new(16.0, 10.5));
     let mut exporter = TelemetryExporter::new(usize::MAX);
 

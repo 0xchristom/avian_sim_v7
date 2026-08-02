@@ -11,29 +11,104 @@ const App: React.FC = () => {
   const [activeTool, setActiveTool] = useState('seed');
   const snapshot = useSimulationStore((state) => state.snapshot);
   const setSnapshot = useSimulationStore((state) => state.setSnapshot);
+  const appendEvents = useSimulationStore((state) => state.appendEvents);
+  const setMetrics = useSimulationStore((state) => state.setMetrics);
+  const metrics = useSimulationStore((state) => state.metrics);
+  const eventLog = useSimulationStore((state) => state.eventLog);
   const [selectedUids, setSelectedUids] = useState<string[]>([]);
   const [marquee, setMarquee] = useState<{ sx: number; sy: number; cx: number; cy: number } | null>(null);
   const marqueeStartRef = useRef<{ clientX: number; clientY: number } | null>(null);
+  // 6.4: drag-to-pan anchor (middle-button, or left-button while zoomed).
+  const panRef = useRef<{ x: number; y: number } | null>(null);
+  // 6.1: per-agent hover info + time controls (pause/step/speed presets).
+  const [hoveredUid, setHoveredUid] = useState<string | null>(null);
+  const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
+  const [paused, setPaused] = useState(false);
+  const [speed, setSpeed] = useState(1);
+  // 6.4: live connection status (reconnect-with-backoff) + client-side FPS.
+  const [connected, setConnected] = useState(false);
+  const [fps, setFps] = useState(0);
+  const fpsRef = useRef({ frames: 0, last: performance.now() });
+  const reconnectDelayRef = useRef(1000);
 
   useEffect(() => {
     if (canvasRef.current) { rendererRef.current = new WebGLRenderer(canvasRef.current); }
-    const ws = new WebSocket('ws://127.0.0.1:8080');
-    wsRef.current = ws;
-    ws.onmessage = (event) => { try { setSnapshot(JSON.parse(event.data)); } catch (e) {} };
-    return () => ws.close();
-  }, [setSnapshot]);
+    let ws: WebSocket | null = null;
+    let closed = false;
+
+    const connect = () => {
+      if (closed) return;
+      ws = new WebSocket('ws://127.0.0.1:8080');
+      wsRef.current = ws;
+      ws.onopen = () => {
+        reconnectDelayRef.current = 1000;
+        setConnected(true);
+      };
+      ws.onclose = () => {
+        setConnected(false);
+        if (!closed) {
+          // 6.4: reconnect with exponential backoff (1s → 2s → 4s → … cap 15s).
+          setTimeout(connect, reconnectDelayRef.current);
+          reconnectDelayRef.current = Math.min(reconnectDelayRef.current * 2, 15000);
+        }
+      };
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data && data.type === 'event_log') {
+            // 6.1: scenario event log (frame + injected events), separate from snapshots.
+            appendEvents(data.frame, data.events);
+          } else if (data && data.type === 'metrics') {
+            // 6.2: dashboard metrics (every ~100 frames), separate from snapshots.
+            setMetrics(data.metrics);
+          } else if (data && data.agents) {
+            setSnapshot(data);
+            // 6.4: client-side FPS = snapshot frames received per second.
+            const now = performance.now();
+            const f = fpsRef.current;
+            f.frames += 1;
+            if (now - f.last >= 500) {
+              setFps(Math.round((f.frames * 1000) / (now - f.last)));
+              f.frames = 0;
+              f.last = now;
+            }
+          }
+        } catch (e) {}
+      };
+    };
+    connect();
+    return () => {
+      closed = true;
+      ws?.close();
+    };
+  }, [setSnapshot, appendEvents, setMetrics]);
 
   useEffect(() => {
-    if (rendererRef.current && snapshot) { rendererRef.current.render(snapshot, selectedUids); }
-  }, [snapshot, selectedUids]);
+    if (rendererRef.current && snapshot) { rendererRef.current.render(snapshot, selectedUids, hoveredUid || undefined); }
+  }, [snapshot, selectedUids, hoveredUid]);
+
+  const sendControl = (command: string, value?: number) => {
+    const msg: Record<string, unknown> = { command };
+    if (value !== undefined) msg.value = value;
+    wsRef.current?.send(JSON.stringify(msg));
+  };
 
   // Esc clears the selection and any in-progress marquee.
+  // Space = pause/play, S = single-step (6.1 time controls).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setSelectedUids([]);
         setMarquee(null);
         marqueeStartRef.current = null;
+      } else if (e.key === ' ') {
+        e.preventDefault();
+        setPaused((p) => { sendControl(p ? 'resume' : 'pause'); return !p; });
+      } else if (e.key === 's' || e.key === 'S') {
+        setPaused((p) => {
+          if (p) { sendControl('step'); }
+          return p;
+        });
       }
     };
     window.addEventListener('keydown', onKey);
@@ -42,9 +117,9 @@ const App: React.FC = () => {
 
   const toSim = (clientX: number, clientY: number) => {
     const rect = canvasRef.current!.getBoundingClientRect();
-    const x = ((clientX - rect.left) / rect.width) * 32;
-    const y = 21 - ((clientY - rect.top) / rect.height) * 21;
-    return { x, y };
+    // 6.4: respect the current zoom/pan camera.
+    const r = rendererRef.current!;
+    return r.screenToWorld(clientX - rect.left, clientY - rect.top, rect.width, rect.height);
   };
 
   const selectInRect = (x0: number, y0: number, x1: number, y1: number) => {
@@ -68,16 +143,67 @@ const App: React.FC = () => {
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (activeTool !== 'select') return;
     e.preventDefault();
+    // 6.4: middle button always pans; left-button pans when zoomed in, else
+    // starts a marquee selection.
+    const zoomed = rendererRef.current ? rendererRef.current.viewZoomRef() > 1 : false;
+    const panMode = e.button === 1 || (e.button === 0 && zoomed);
+    if (panMode) {
+      panRef.current = { x: e.clientX, y: e.clientY };
+      return;
+    }
     marqueeStartRef.current = { clientX: e.clientX, clientY: e.clientY };
     setMarquee({ sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY });
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!marqueeStartRef.current) return;
-    setMarquee(m => (m ? { ...m, cx: e.clientX, cy: e.clientY } : m));
+    // 6.4: drag-to-pan while the pan anchor is set.
+    if (panRef.current && rendererRef.current) {
+      const rect = canvasRef.current!.getBoundingClientRect();
+      const dx = (e.clientX - panRef.current.x) / rect.width * (32 / rendererRef.current.viewZoomRef());
+      const dy = (e.clientY - panRef.current.y) / rect.height * (21 / rendererRef.current.viewZoomRef());
+      rendererRef.current.panBy(-dx, -dy);
+      panRef.current = { x: e.clientX, y: e.clientY };
+      return;
+    }
+    if (marqueeStartRef.current) {
+      setMarquee(m => (m ? { ...m, cx: e.clientX, cy: e.clientY } : m));
+    }
+    // 6.1: per-agent info on hover — nearest agent/predator within ~0.8 m.
+    const { x, y } = toSim(e.clientX, e.clientY);
+    // Holder object: TS does not narrow a plain `let` mutated inside a closure.
+    const pick: { closest: { uid: string; dist: number } | null } = { closest: null };
+    const consider = (uid: string, px: number, py: number) => {
+      const dist = Math.sqrt((px - x) ** 2 + (py - y) ** 2);
+      if (dist < 0.8 && (!pick.closest || dist < pick.closest.dist)) pick.closest = { uid, dist };
+    };
+    snapshot?.agents.forEach(a => consider(a.uid, a.pos[0], a.pos[1]));
+    (snapshot?.predators || []).forEach(p => consider(p.uid, p.pos[0], p.pos[1]));
+    setHoveredUid(pick.closest ? pick.closest.uid : null);
+    setHoverPos(pick.closest ? { x: e.clientX, y: e.clientY } : null);
+  };
+
+  const handleMouseLeave = () => {
+    setHoveredUid(null);
+    setHoverPos(null);
+  };
+
+  // 6.4: mouse-wheel zoom centered on the cursor position.
+  const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    const world = toSim(e.clientX, e.clientY);
+    const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+    const renderer = rendererRef.current!;
+    renderer.setZoom(renderer.viewZoomRef() * factor, world.x, world.y);
   };
 
   const handleMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (panRef.current) {
+      panRef.current = null;
+      return;
+    }
     if (!marqueeStartRef.current) return;
     const start = marqueeStartRef.current;
     marqueeStartRef.current = null;
@@ -133,30 +259,89 @@ const App: React.FC = () => {
     height: Math.abs(marquee.cy - marquee.sy),
   } : null;
 
+  // 6.1: hovered entity for the tooltip (agent or predator).
+  const hoveredAgent = hoveredUid ? snapshot?.agents.find(a => a.uid === hoveredUid) : null;
+  const hoveredPredator = hoveredUid ? snapshot?.predators.find(p => p.uid === hoveredUid) : null;
+  const tooltipRect = hoverPos && wrapperRect ? {
+    left: hoverPos.x - wrapperRect.left + 14,
+    top: hoverPos.y - wrapperRect.top + 14,
+  } : null;
+
+  const controlBtn = (base: React.CSSProperties): React.CSSProperties => ({
+    flex: 1,
+    padding: '6px 0',
+    fontSize: '12px',
+    cursor: 'pointer',
+    borderRadius: '4px',
+    border: '1px solid #444',
+    background: '#2a2f3a',
+    color: '#d4d4d4',
+    ...base,
+  });
+
   return (
     <div style={{ display: 'flex', width: '100vw', height: '100vh', backgroundColor: '#0a0b10', color: '#d4d4d4', fontFamily: 'Courier New' }}>
-      <div className="sidebar" style={{ width: '400px', height: '100vh', overflowY: 'auto', background: '#14161f', borderRight: '2px solid #ff6c0c', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
-        <div style={{ padding: '15px', borderBottom: '2px solid #ff6c0c', textAlign: 'center' }}>
-          <h2 style={{ margin: 0, color: '#ff6c0c' }}>AVIAN SIM v7.0 PRO</h2>
-          <p style={{ margin: '5px 0 0 0', fontSize: '12px', color: '#888' }}>Czas: {snapshot ? formatTime(snapshot.time_us) : "00:00"}</p>
+      <div className="sidebar" style={{ width: '340px', height: '100vh', overflowY: 'auto', background: '#14161f', borderRight: '2px solid #ff6c0c', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ padding: '12px 15px', borderBottom: '2px solid #ff6c0c', textAlign: 'center' }}>
+          <h2 style={{ margin: 0, color: '#ff6c0c', fontSize: '16px' }}>AVIAN SIM v7.0 PRO</h2>
+          {/* 6.4: live status bar — connection + fps + sim time + agent/grain counts. */}
+          <div style={{ margin: '6px 0 0 0', fontSize: '11px', display: 'flex', justifyContent: 'center', gap: '10px', color: '#888' }}>
+            <span style={{ color: connected ? '#00ffcc' : '#ff3366' }}>{connected ? '● CONNECTED' : '○ DISCONNECTED'}</span>
+            <span>{fps} fps</span>
+            <span>#{snapshot?.frame ?? 0}</span>
+            <span>{snapshot ? formatTime(snapshot.time_us) : "00:00"}</span>
+            <span>{snapshot?.agents.length ?? 0} birds</span>
+            <span>{snapshot?.grains.length ?? 0} grains</span>
+          </div>
         </div>
         
-        {/* Ticket R2-3: Przywrócony toolbar z przełączaniem */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '15px', padding: '15px', borderBottom: '1px solid #333' }}>
-          <button onClick={() => setActiveTool('seed')} style={{ aspectRatio: 1, background: activeTool === 'seed' ? '#ff6c0c' : '#2a2f3a', border: `1px solid ${activeTool === 'seed' ? '#ff6c0c' : '#444'}`, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px' }}>
-            <svg viewBox="0 0 24 24" style={{ stroke: activeTool === 'seed' ? '#000' : '#d4d4d4', width: '24px', height: '24px', fill: 'none', strokeWidth: 2 }}><circle cx="12" cy="12" r="3"></circle><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"></path></svg>
+        {/* Ticket R2-3: Toolbar with tool switching (seed / select / predator). */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', padding: '12px', borderBottom: '1px solid #333' }}>
+          <button onClick={() => setActiveTool('seed')} title="Seed: click to drop grain" style={{ aspectRatio: 1, background: activeTool === 'seed' ? '#ff6c0c' : '#2a2f3a', border: `1px solid ${activeTool === 'seed' ? '#ff6c0c' : '#444'}`, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px' }}>
+            <svg viewBox="0 0 24 24" style={{ stroke: activeTool === 'seed' ? '#000' : '#d4d4d4', width: '22px', height: '22px', fill: 'none', strokeWidth: 2 }}><circle cx="12" cy="12" r="3"></circle><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"></path></svg>
           </button>
-          <button onClick={() => setActiveTool('select')} style={{ aspectRatio: 1, background: activeTool === 'select' ? '#ff6c0c' : '#2a2f3a', border: `1px solid ${activeTool === 'select' ? '#ff6c0c' : '#444'}`, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px' }}>
-            <svg viewBox="0 0 24 24" style={{ stroke: activeTool === 'select' ? '#000' : '#d4d4d4', width: '24px', height: '24px', fill: 'none', strokeWidth: 2 }}><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"></path></svg>
+          <button onClick={() => setActiveTool('select')} title="Select: drag a box or click a bird" style={{ aspectRatio: 1, background: activeTool === 'select' ? '#ff6c0c' : '#2a2f3a', border: `1px solid ${activeTool === 'select' ? '#ff6c0c' : '#444'}`, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px' }}>
+            <svg viewBox="0 0 24 24" style={{ stroke: activeTool === 'select' ? '#000' : '#d4d4d4', width: '22px', height: '22px', fill: 'none', strokeWidth: 2 }}><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"></path></svg>
           </button>
           {/* 2.2: spawn a hawk on click */}
-          <button onClick={() => setActiveTool('predator')} style={{ aspectRatio: 1, background: activeTool === 'predator' ? '#ff6c0c' : '#2a2f3a', border: `1px solid ${activeTool === 'predator' ? '#ff6c0c' : '#444'}`, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px' }}>
-            <svg viewBox="0 0 24 24" style={{ stroke: activeTool === 'predator' ? '#000' : '#d4d4d4', width: '24px', height: '24px', fill: 'none', strokeWidth: 2 }}><path d="M12 3l6 9-6 9-6-9z"></path></svg>
+          <button onClick={() => setActiveTool('predator')} title="Predator: click to spawn a hawk" style={{ aspectRatio: 1, background: activeTool === 'predator' ? '#ff6c0c' : '#2a2f3a', border: `1px solid ${activeTool === 'predator' ? '#ff6c0c' : '#444'}`, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px' }}>
+            <svg viewBox="0 0 24 24" style={{ stroke: activeTool === 'predator' ? '#000' : '#d4d4d4', width: '22px', height: '22px', fill: 'none', strokeWidth: 2 }}><path d="M12 3l6 9-6 9-6-9z"></path></svg>
           </button>
         </div>
 
-        <div style={{ padding: '15px', flex: 1 }}>
-          <Dashboard agents={snapshot?.agents || []} selectedUids={selectedUids} lightLevel={snapshot?.light_level} deadCount={snapshot?.dead_count} predatorCount={snapshot?.predators?.length} predators={snapshot?.predators || []} />
+        {/* 6.1: transport time controls (pause / step / speed presets). */}
+        <div style={{ padding: '8px 12px', borderBottom: '1px solid #333', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+          <div style={{ display: 'flex', gap: '6px' }}>
+            <button onClick={() => { const p = !paused; setPaused(p); sendControl(p ? 'pause' : 'resume'); }} style={controlBtn({ background: paused ? '#ff6c0c' : '#2a2f3a', color: paused ? '#000' : '#d4d4d4' })}>
+              {paused ? '▶ PLAY' : '⏸ PAUSE'}
+            </button>
+            <button onClick={() => { if (paused) { sendControl('step'); } }} style={controlBtn({ opacity: paused ? 1 : 0.4 })} title="Step one frame">
+              STEP
+            </button>
+          </div>
+          <div style={{ display: 'flex', gap: '6px' }}>
+            {[1, 10, 100].map((s) => (
+              <button key={s} onClick={() => { setSpeed(s); sendControl('speed', s); }} style={controlBtn({ background: speed === s ? '#ff6c0c' : '#2a2f3a', color: speed === s ? '#000' : '#d4d4d4' })}>
+                {s}×
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ padding: '12px', flex: 1 }}>
+          <Dashboard agents={snapshot?.agents || []} selectedUids={selectedUids} lightLevel={snapshot?.light_level} deadCount={snapshot?.dead_count} predatorCount={snapshot?.predators?.length} predators={snapshot?.predators || []} metrics={metrics} onSelectUid={(uid) => setSelectedUids([uid])} />
+        </div>
+
+        {/* 6.1: event log panel — last injected scenario events. */}
+        <div style={{ borderTop: '1px solid #333', padding: '10px 12px', maxHeight: '150px', overflowY: 'auto', background: '#10121a' }}>
+          <h3 style={{ margin: '0 0 6px 0', fontSize: '12px', color: '#00ffcc' }}>EVENT LOG</h3>
+          {eventLog.length === 0 && <p style={{ color: '#666', fontSize: '11px', margin: 0 }}>No events yet</p>}
+          {eventLog.slice(-30).reverse().map((entry, i) => (
+            <div key={`${entry.frame}-${i}`} style={{ fontSize: '10px', color: '#888', display: 'flex', gap: '8px' }}>
+              <span style={{ color: '#ff6c0c' }}>#{entry.frame}</span>
+              <span style={{ color: '#00ffcc' }}>{entry.event}</span>
+            </div>
+          ))}
         </div>
       </div>
       
@@ -167,8 +352,16 @@ const App: React.FC = () => {
             onMouseDown={handleMouseDown}
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
-            style={{ background: '#1a1c25', border: '1px solid #333', boxShadow: '0 0 20px rgba(0,255,204,0.1)', cursor: activeTool === 'select' ? 'crosshair' : 'crosshair' }} 
+            onMouseLeave={handleMouseLeave}
+            onWheel={handleWheel}
+            style={{ background: '#1a1c25', border: '1px solid #333', boxShadow: '0 0 20px rgba(0,255,204,0.1)', cursor: 'crosshair' }} 
           />
+          {/* 6.4: viewport reset — back to the full 32×21 arena view. */}
+          <button onClick={() => { rendererRef.current?.resetView(); }} title="Reset view (full arena)" style={{
+            position: 'absolute', top: '8px', right: '8px', zIndex: 12,
+            background: '#2a2f3a', color: '#d4d4d4', border: '1px solid #444',
+            borderRadius: '4px', padding: '3px 8px', fontSize: '11px', cursor: 'pointer',
+          }}>RESET VIEW</button>
           {marqueeStyle && (
             <div style={{
               position: 'absolute',
@@ -181,6 +374,59 @@ const App: React.FC = () => {
               pointerEvents: 'none',
               zIndex: 10,
             }} />
+          )}
+          {tooltipRect && (hoveredAgent || hoveredPredator) && (
+            <div style={{
+              position: 'absolute',
+              left: tooltipRect.left,
+              top: tooltipRect.top,
+              background: 'rgba(10,11,16,0.95)',
+              border: `1px solid ${hoveredAgent ? '#00ffcc' : '#ff2222'}`,
+              padding: '6px 9px',
+              borderRadius: '4px',
+              fontSize: '11px',
+              lineHeight: '1.5',
+              pointerEvents: 'none',
+              zIndex: 20,
+              whiteSpace: 'nowrap',
+            }}>
+              {hoveredAgent ? (
+                <>
+                  <div style={{ color: '#00ffcc', fontWeight: 'bold' }}>PIGEON: {hoveredAgent.uid}</div>
+                  <div>FSM: <span style={{ color: '#ffcc00' }}>{hoveredAgent.fsm_state}</span></div>
+                  <div>E: {hoveredAgent.energy_kj.toFixed(1)} kJ · H: {(hoveredAgent.hunger * 100).toFixed(0)}%</div>
+                  <div>Age: {hoveredAgent.age_years.toFixed(1)}y · Mass: {hoveredAgent.mass_g.toFixed(0)} g</div>
+                  <div>Vitality: {hoveredAgent.vitality?.toFixed(2) ?? '—'}{hoveredAgent.sick ? ' · 🦠 SICK' : ''}</div>
+                  {hoveredAgent.alarm_triggered && <div style={{ color: '#ff2222' }}>🚨 ALARM</div>}
+                </>
+              ) : (
+                <>
+                  <div style={{ color: '#ff2222', fontWeight: 'bold' }}>PREDATOR: {hoveredPredator!.uid}</div>
+                  <div>Expires in: {hoveredPredator!.lifetime_remaining_s.toFixed(1)} s</div>
+                  <div>Hunt: <span style={{ color: '#ffcc00' }}>{hoveredPredator!.hunt_state}</span> · Speed: {hoveredPredator!.speed_level}/5</div>
+                  <div>Meals: {hoveredPredator!.meals_eaten}/3</div>
+                </>
+              )}
+            </div>
+          )}
+          {!snapshot && (
+            <div style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: 'rgba(10,11,16,0.85)',
+              zIndex: 15,
+              pointerEvents: 'none',
+              textAlign: 'center',
+              padding: '20px',
+            }}>
+              <div>
+                <div style={{ color: '#ff3366', fontSize: '16px', marginBottom: '8px' }}>Simulation not running</div>
+                <div style={{ color: '#888', fontSize: '12px' }}>Start the Rust server (cargo run --bin sim_server) to begin.</div>
+              </div>
+            </div>
           )}
         </div>
       </main>

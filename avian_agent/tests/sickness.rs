@@ -94,6 +94,9 @@ fn test_sick_slows_movement_and_flags() {
 fn test_sick_captured_before_healthy() {
     let config = SimulationConfig {
         predator_expiry: false,
+        // 6.2: keep the predator on the map for the whole test (its own
+        // acceptance test covers the 3-meal despawn).
+        predator_fill_meals: false,
         ..SimulationConfig::default()
     };
     let mut sim = Simulation::new(23, config);

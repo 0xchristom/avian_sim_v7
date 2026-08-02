@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod time;
 pub mod rng;
 pub mod spatial;
@@ -23,6 +25,13 @@ pub struct SimulationConfig {
     /// when it elapses. Headless flee/capture benchmarks disable it to keep a
     /// persistent predator (the two behaviors have separate acceptance tests).
     pub predator_expiry: bool,
+    /// 6.2: when true, a predator despawns after eating `predator_fill_meals_target`
+    /// pigeons (captures) — the "disappears after 3 meals" request. Existing
+    /// persistent-predator acceptance tests disable both this and
+    /// `predator_expiry` to keep a predator on the map for the whole run.
+    pub predator_fill_meals: bool,
+    /// 6.2: captures needed before a fill-meals predator despawns.
+    pub predator_fill_meals_target: u32,
     /// 4.2: when true, immigration respawns keep the population at
     /// MIN_POPULATION. Deterministic single-bird tests (e.g. memory-biased
     /// foraging) disable it so no flock is auto-spawned (boids would perturb
@@ -85,6 +94,8 @@ impl Default for SimulationConfig {
             gravity: 0.0,
             max_agents: 1000,
             predator_expiry: true,
+            predator_fill_meals: true,
+            predator_fill_meals_target: calibration::PREDATOR_FILL_MEALS_TARGET,
             immigration_enabled: true,
             urban_obstacles: false,
             weather_enabled: false,
@@ -134,6 +145,9 @@ pub struct AgentSnapshot {
     pub sick: bool,
     /// 4.0 vitality (obs_v1 input, 3.1) — monotonic Weibull decay model.
     pub vitality: f64,
+    /// 6.1: remembered food locations as `[x, y, strength]` (viewer memory
+    /// dots). Strength fades toward 0 as the memory decays (4.2).
+    pub memory: Vec<[f64; 3]>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -141,6 +155,12 @@ pub struct PredatorSnapshot {
     pub uid: String,
     pub pos: [f64; 2],
     pub lifetime_remaining_s: f64,
+    /// 6.2: current hunt state (Await/Chase/Catch) for the viewer.
+    pub hunt_state: String,
+    /// 6.2: dynamic speed tier on the 1 (slow)..5 (very fast) scale.
+    pub speed_level: u8,
+    /// 6.2: captures eaten so far.
+    pub meals_eaten: u32,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -183,6 +203,12 @@ pub struct Simulation {
     pub next_uid: u64,
     pub deaths: u32,
     pub predator_kills: u32,
+    /// 6.2: cumulative grains eaten (forage-success rate = grains_consumed /
+    /// (arena area × elapsed seconds)).
+    pub grains_consumed: u64,
+    /// 6.2: age in years at death, one entry per despawned agent — fed to the
+    /// survival-curve histogram in the metrics dashboard.
+    pub death_ages: Vec<f64>,
     pub events_log: Vec<(u32, Event)>,
     /// 7.2 energy-balance accounting (kJ). Inflow from grain consumption, the
     /// amount actually drained from live agents, and energy removed from the
@@ -219,6 +245,8 @@ impl Simulation {
             next_uid: 1,
             deaths: 0,
             predator_kills: 0,
+            grains_consumed: 0,
+            death_ages: Vec::new(),
             events_log: Vec::new(),
             total_energy_intake_kj: 0.0,
             total_energy_expenditure_kj: 0.0,
@@ -360,6 +388,10 @@ impl Simulation {
                 capture_cooldown: 0,
                 patrol_target: None,
                 lifetime_remaining_s: lifetime,
+                meals_eaten: 0,
+                hunt_state: PredatorHuntState::Await,
+                speed_level: calibration::PREDATOR_SPEED_LEVEL_MIN,
+                hunt_timer_s: 0.0,
             },
             AgentUid(uid),
             PhysicsHandle(handle),
@@ -433,6 +465,22 @@ impl Simulation {
     }
 
     pub fn snapshot(&self) -> SimulationSnapshot {
+        // 6.1: spatial memory per entity, looked up below without growing the
+        // 10-component snapshot query tuple (hecs tuple limit).
+        let memory_by_entity: std::collections::HashMap<_, Vec<[f64; 3]>> = self
+            .world
+            .query::<&MemorySlots>()
+            .iter()
+            .map(|(id, ms)| {
+                let slots = ms
+                    .slots
+                    .iter()
+                    .map(|s| [s.pos.x, s.pos.y, s.strength])
+                    .collect();
+                (id, slots)
+            })
+            .collect();
+
         let mut agents = Vec::new();
         for (_id, (pos, head, vel, meta, mass, age, fsm, hb, uid, alarm)) in
             self.world.query::<(&Position, &Heading, &Velocity, &Metabolism, &Mass, &Age, &FSMState, &HeadBob, &AgentUid, &Alarm)>().iter()
@@ -451,6 +499,7 @@ impl Simulation {
                 alarm_triggered: alarm.0,
                 sick: age.vitality < calibration::SICK_VITALITY_THRESHOLD,
                 vitality: age.vitality,
+                memory: memory_by_entity.get(&_id).cloned().unwrap_or_default(),
             });
         }
 
@@ -467,6 +516,9 @@ impl Simulation {
                 uid: uid.0.clone(),
                 pos: [pos.0.x, pos.0.y],
                 lifetime_remaining_s: pred.lifetime_remaining_s,
+                hunt_state: format!("{:?}", pred.hunt_state),
+                speed_level: pred.speed_level,
+                meals_eaten: pred.meals_eaten,
             });
         }
 
@@ -532,6 +584,8 @@ impl Simulation {
             next_uid: ckpt.next_uid,
             deaths: ckpt.deaths,
             predator_kills: ckpt.predator_kills,
+            grains_consumed: ckpt.grains_consumed,
+            death_ages: ckpt.death_ages,
             events_log: ckpt.events_log,
             total_energy_intake_kj: ckpt.total_energy_intake_kj,
             total_energy_expenditure_kj: ckpt.total_energy_expenditure_kj,

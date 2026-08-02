@@ -39,8 +39,8 @@ pub fn collect_threats(sim: &Simulation) -> FxHashMap<Entity, Vector2<f64>> {
         return threats;
     }
 
-    for (id, (pos, head, vision, _meta)) in
-        sim.world.query::<(&Position, &Heading, &Vision, &Metabolism)>().iter()
+    for (id, (pos, head, vision, _meta, fsm)) in
+        sim.world.query::<(&Position, &Heading, &Vision, &Metabolism, &FSMState)>().iter()
     {
         let mut nearest: Option<(f64, Vector2<f64>)> = None;
         // 4.4: rain shrinks the predator-detection range like every other
@@ -57,12 +57,23 @@ pub fn collect_threats(sim: &Simulation) -> FxHashMap<Entity, Vector2<f64>> {
             if dist > detect_radius || dist < 1e-6 {
                 continue;
             }
-            // FOV cone check (mirrors perception::cone_cast).
-            let angle = offset.y.atan2(offset.x) - head.0;
-            let norm_ang =
-                ((angle + std::f64::consts::PI) % (2.0 * std::f64::consts::PI)) - std::f64::consts::PI;
-            if norm_ang.abs() > vision.fov_degrees.to_radians() / 2.0 {
-                continue;
+            // FOV cone check (mirrors perception::cone_cast). An already-
+            // fleeing pigeon does NOT lose the threat by turning its back:
+            // the hawk sits ~180° behind, outside the 170° half-cone, which
+            // otherwise cancels Flee one frame after it starts (the "1-frame
+            // flee" bug that made Fleeing invisible in the viewer). Commit to
+            // the escape until the hawk leaves detection radius.
+            if *fsm != FSMState::Fleeing {
+                let angle = offset.y.atan2(offset.x) - head.0;
+                // `rem_euclid` (NOT `%`): Rust's float `%` keeps the dividend's
+                // sign, so `(angle + π) % 2π` yields values outside [-π, π]
+                // whenever `angle < -π` (heading in the left half-plane) and
+                // the FOV gate then rejects predators that are actually right
+                // in front of the pigeon — the "13/30 alarm" detection hole.
+                let norm_ang = crate::perception::normalize_angle_relative(angle);
+                if norm_ang.abs() > vision.fov_degrees.to_radians() / 2.0 {
+                    continue;
+                }
             }
             // 4.3: a wall/building on the sight line hides the hawk.
             if sim
@@ -84,31 +95,45 @@ pub fn collect_threats(sim: &Simulation) -> FxHashMap<Entity, Vector2<f64>> {
     threats
 }
 
-/// Pursuit plan: velocity for each predator.
+/// Pursuit plan: velocity for each predator (6.2 hunt-state machine).
 ///
-/// - If an agent is inside the predator's detection radius → chase the nearest.
-/// - Otherwise → patrol toward a waypoint (re-randomized when reached), so the
-///   predator RANGES across the map instead of pinning one cluster.
+/// Speed is dynamic on the 1 (slow)..5 (very fast) scale:
+/// - **Await** — no prey inside the detection radius → slow patrol (speed
+///   level decays toward 1) toward the ranging waypoint.
+/// - **Chase** — an agent is inside the radius (and no reposition cooldown) →
+///   pursue the nearest at a speed level that RAMPS toward 5 (very fast).
+/// - **Catch** — just struck (capture or miss): halted "busy" for
+///   `PREDATOR_CATCH_BUSY_S` (1 s), then back to Await.
 ///
 /// Applied to physics bodies BEFORE `physics.step` so the predator integrates
 /// with the same solver step as everyone else.
 pub fn plan_movement(sim: &mut Simulation, positions: &FxHashMap<Entity, Vector2<f64>>) -> Vec<(Entity, Vector2<f64>)> {
-    // 4.1 v2: pigeons flee by flying at FLY_SPEED_MS; the predator's absolute
-    // speed is recalibrated to sit between a sick pigeon's half-speed flight
-    // (7.5) and a healthy pigeon's full flight (15) — see PREDATOR_SPEED_MS.
-    let pred_speed = calibration::PREDATOR_SPEED_MS;
+    let dt = sim.config.dt;
+    let max_level = calibration::PREDATOR_SPEED_LEVEL_MAX as f64;
+    let min_level = calibration::PREDATOR_SPEED_LEVEL_MIN as f64;
 
     // Snapshot predator state so we can touch `sim.rng` while planning.
-    let predators_data: Vec<(Entity, Vector2<f64>, u32, Option<Vector2<f64>>)> = sim
+    let predators_data: Vec<(Entity, Vector2<f64>, Predator)> = sim
         .world
         .query::<(&Position, &Predator)>()
         .iter()
-        .map(|(id, (p, pr))| (id, p.0, pr.capture_cooldown, pr.patrol_target))
+        .map(|(id, (p, pr))| (id, p.0, *pr))
         .collect();
 
     // Read phase: compute linvels + refreshed patrol targets.
-    let mut updates: Vec<(Entity, Vector2<f64>, Option<Vector2<f64>>)> = Vec::new();
-    for (id, ppos, cooldown, patrol_target) in predators_data {
+    let mut updates: Vec<(Entity, Vector2<f64>, Predator)> = Vec::new();
+    for (id, ppos, mut pred) in predators_data {
+        // 6.2 Catch beat: the predator is busy (halted) while the timer runs.
+        if pred.hunt_state == PredatorHuntState::Catch {
+            pred.hunt_timer_s -= dt;
+            if pred.hunt_timer_s <= 0.0 {
+                pred.hunt_timer_s = 0.0;
+                pred.hunt_state = PredatorHuntState::Await;
+            }
+            updates.push((id, Vector2::zeros(), pred));
+            continue;
+        }
+
         let mut nearest: Option<(f64, Vector2<f64>)> = None;
         for (_aid, apos) in positions.iter() {
             let d = (*apos - ppos).norm();
@@ -117,47 +142,68 @@ pub fn plan_movement(sim: &mut Simulation, positions: &FxHashMap<Entity, Vector2
             }
         }
 
-        let mut new_patrol = patrol_target;
+        let mut new_patrol = pred.patrol_target;
         // During a reposition cooldown the predator is flying AWAY to a fresh
         // area — patrol toward the waypoint instead of re-engaging.
-        let chasing = cooldown == 0;
+        let chasing = pred.capture_cooldown == 0;
         let linvel = match nearest {
             Some((d, target)) if chasing && d <= calibration::PREDATOR_DETECTION_RADIUS_M => {
+                // 6.2 Chase: ramp speed toward very-fast (5).
+                pred.hunt_state = PredatorHuntState::Chase;
+                let next = (pred.speed_level as f64)
+                    + calibration::PREDATOR_SPEED_RAMP_LEVELS_PER_S * dt;
+                pred.speed_level = next.min(max_level).round().max(min_level) as u8;
+                let speed = speed_for_level(pred.speed_level);
                 let dir = target - ppos;
                 if dir.norm() > 1e-6 {
-                    dir / dir.norm() * pred_speed
+                    dir / dir.norm() * speed
                 } else {
                     Vector2::zeros()
                 }
             }
             _ => {
+                // 6.2 Await: patrol, speed decays toward slow (1).
+                pred.hunt_state = PredatorHuntState::Await;
+                let next = (pred.speed_level as f64)
+                    - calibration::PREDATOR_SPEED_DECAY_LEVELS_PER_S * dt;
+                pred.speed_level = next.max(min_level).round().min(max_level) as u8;
+                let speed = speed_for_level(pred.speed_level);
                 // Patrol mode: waypoint, re-randomize once reached. 4.3: sample
                 // obstacle-free points so the hawk never patrols INTO a building.
-                let target = patrol_target.unwrap_or_else(|| random_patrol_target(&mut sim.rng, sim.config.world_width, sim.config.world_height, &sim.obstacles));
+                let target = pred.patrol_target.unwrap_or_else(|| random_patrol_target(&mut sim.rng, sim.config.world_width, sim.config.world_height, &sim.obstacles));
                 let dir = target - ppos;
                 if dir.norm() < 1.0 {
                     new_patrol = Some(random_patrol_target(&mut sim.rng, sim.config.world_width, sim.config.world_height, &sim.obstacles));
                 }
                 if dir.norm() > 1e-6 {
-                    dir / dir.norm() * pred_speed
+                    dir / dir.norm() * speed
                 } else {
                     Vector2::zeros()
                 }
             }
         };
-        updates.push((id, linvel, new_patrol));
+        updates.push((id, linvel, pred));
     }
 
-    // Write phase: persist refreshed patrol targets.
-    for (id, _, target) in &updates {
-        if let Some(t) = target {
-            if let Ok(mut pred) = sim.world.get::<&mut Predator>(*id) {
-                pred.patrol_target = Some(*t);
-            }
+    // Write phase: persist refreshed patrol targets + hunt state.
+    for (id, _, pred) in &updates {
+        if let Ok(mut cur) = sim.world.get::<&mut Predator>(*id) {
+            cur.patrol_target = pred.patrol_target;
+            cur.hunt_state = pred.hunt_state;
+            cur.speed_level = pred.speed_level;
+            cur.hunt_timer_s = pred.hunt_timer_s;
         }
     }
 
     updates.into_iter().map(|(id, v, _)| (id, v)).collect()
+}
+
+/// 6.2: absolute speed for a speed level — linear from `PREDATOR_SPEED_MS/5`
+/// (slow, level 1) up to `PREDATOR_SPEED_MS` (very fast, level 5).
+fn speed_for_level(level: u8) -> f64 {
+    calibration::PREDATOR_SPEED_MS
+        * (level as f64)
+        / calibration::PREDATOR_SPEED_LEVEL_MAX as f64
 }
 
 fn random_patrol_target(rng: &mut SimRng, w: f64, h: f64, obstacles: &[avian_core::components::Obstacle]) -> Vector2<f64> {
@@ -208,9 +254,16 @@ pub fn resolve_contact(sim: &mut Simulation, positions: &FxHashMap<Entity, Vecto
                     if let Ok(mut pr) = sim.world.get::<&mut Predator>(*pid) {
                         pr.patrol_target = Some(far_random_point(&mut sim.rng, *ppos, sim.config.world_width, sim.config.world_height, &sim.obstacles));
                         pr.capture_cooldown = calibration::PREDATOR_REPOSITION_COOLDOWN_FRAMES;
+                        // 6.2: count the meal + enter the 1 s "busy" Catch beat.
+                        pr.meals_eaten += 1;
+                        pr.hunt_state = PredatorHuntState::Catch;
+                        pr.hunt_timer_s = calibration::PREDATOR_CATCH_BUSY_S;
                     }
                 } else if let Ok(mut pr) = sim.world.get::<&mut Predator>(*pid) {
                     pr.capture_cooldown = calibration::PREDATOR_MISS_COOLDOWN_FRAMES;
+                    // 6.2: a miss also puts the hawk briefly out of action.
+                    pr.hunt_state = PredatorHuntState::Catch;
+                    pr.hunt_timer_s = calibration::PREDATOR_CATCH_BUSY_S;
                 }
             }
         }
@@ -238,6 +291,36 @@ pub fn resolve_contact(sim: &mut Simulation, positions: &FxHashMap<Entity, Vecto
     for (id, _, _) in &preds {
         if let Ok(mut pr) = sim.world.get::<&mut Predator>(*id) {
             pr.capture_cooldown = pr.capture_cooldown.saturating_sub(1);
+        }
+    }
+
+    // 6.2: a predator that reached its meal quota despawns satisfied ("eats
+    // N pigeons, then disappears"). Logged as RemovePredator so the
+    // disappearance is a ground-truth event, same as lifetime expiry.
+    if sim.config.predator_fill_meals {
+        let quota = sim.config.predator_fill_meals_target;
+        let satiated: Vec<(Entity, String)> = sim
+            .world
+            .query::<(&Predator, &AgentUid)>()
+            .iter()
+            .filter(|(_, (pr, _))| pr.meals_eaten >= quota)
+            .map(|(id, (_, uid))| (id, uid.0.clone()))
+            .collect();
+        if !satiated.is_empty() {
+            let frame = sim.time.frame;
+            for (id, uid) in satiated {
+                let handle = sim.world.get::<&PhysicsHandle>(id).ok().map(|h| h.0);
+                sim.world.despawn(id).ok();
+                if let Some(h) = handle {
+                    sim.physics.remove_body(h);
+                }
+                sim.events_log.push((
+                    frame,
+                    avian_core::events::Event::RemovePredator(
+                        avian_core::events::RemovePredatorRequest { uid },
+                    ),
+                ));
+            }
         }
     }
 

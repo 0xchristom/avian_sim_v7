@@ -244,6 +244,26 @@ pub const PREDATOR_LIFETIME_MIN_S: f64 = 5.0;
 /// random lifetime in `[MIN_S, MAX_S]` at spawn, then despawns when it elapses.
 pub const PREDATOR_LIFETIME_MAX_S: f64 = 15.0;
 
+/// 6.2 hunt-state machine: how long a predator stays BUSY (halted) after a
+/// strike or a miss before it re-engages/patrols. The "catches it — busy 1 s"
+/// beat from the request.
+pub const PREDATOR_CATCH_BUSY_S: f64 = 1.0;
+/// Dynamic speed scale bounds (1 = slow, 5 = very fast). The predator's
+/// `speed_level` lives in `[MIN, MAX]`; chase ramps it UP, await decays it
+/// DOWN. Level N maps to `PREDATOR_SPEED_MS * N / MAX`.
+pub const PREDATOR_SPEED_LEVEL_MIN: u8 = 1;
+pub const PREDATOR_SPEED_LEVEL_MAX: u8 = 5;
+/// Chase acceleration (speed levels per sim-second) — a hawk ramps to full
+/// speed (level 5) in `(MAX-MIN)/RAMP ≈ 0.5 s` of pursuit.
+pub const PREDATOR_SPEED_RAMP_LEVELS_PER_S: f64 = 8.0;
+/// Await deceleration (speed levels per sim-second) — returning to a slow
+/// patrol (level 1) when no prey is in range.
+pub const PREDATOR_SPEED_DECAY_LEVELS_PER_S: f64 = 4.0;
+
+/// 6.2: meals (captures) a predator needs before it despawns automatically,
+/// per the "predator disappears after eating 3 pigeons" request.
+pub const PREDATOR_FILL_MEALS_TARGET: u32 = 3;
+
 /// Energy gained per grain consumed (2.4 uses this for the reward too).
 pub const GRAIN_ENERGY_KJ: f64 = 0.5;
 
@@ -276,6 +296,91 @@ pub const REWARD_CAPTURED: f64 = -10.0;
 /// +0.5 when a predator leaves (despawns / moves away) without capturing — i.e.
 /// a fleeing episode ends safely (one-shot).
 pub const REWARD_FLEE_SUCCESS: f64 = 0.5;
+
+// ---------------------------------------------------------------------------
+// 6.3 calibration export — single source of truth for the Python analysis.
+// ---------------------------------------------------------------------------
+/// 6.3: export every calibration constant + sampled helper outputs to JSON so
+/// `analysis/check_biology.py` reads the SAME values as the compiled sim — no
+/// second hardcoded copy that can drift. The `calibration_export_matches` test
+/// below regenerates `analysis/calibration_export.json` and fails the release
+/// gate if it differs from the committed file.
+pub fn calibration_export_json() -> serde_json::Value {
+    serde_json::json!({
+        "adult_mass_g": ADULT_MASS_G,
+        "hatchling_mass_g": HATCHLING_MASS_G,
+        "fledgling_mass_g": FLEDGLING_MASS_G,
+        "adult_bmr_watts": ADULT_BMR_WATTS,
+        "walk_speed_ms": WALK_SPEED_MS,
+        "fly_speed_ms": FLY_SPEED_MS,
+        "flight_mr_multiplier": FLIGHT_MR_MULTIPLIER,
+        "flight_speed_threshold_ms": FLIGHT_SPEED_THRESHOLD_MS,
+        "daily_energy_requirement_kj": DAILY_ENERGY_REQUIREMENT_KJ,
+        "binocular_overlap_degrees": BINOCULAR_OVERLAP_DEGREES,
+        "vision_fov_degrees": VISION_FOV_DEGREES,
+        "vision_max_range_m": VISION_MAX_RANGE_M,
+        "vitality_t_mid_years": VITALITY_T_MID_YEARS,
+        "vitality_shape_p": VITALITY_SHAPE_P,
+        "wild_max_lifespan_years": WILD_MAX_LIFESPAN_YEARS,
+        "sick_vitality_threshold": SICK_VITALITY_THRESHOLD,
+        "sick_speed_multiplier": SICK_SPEED_MULTIPLIER,
+        "critical_energy_threshold_kj": CRITICAL_ENERGY_THRESHOLD_KJ,
+        "foraging_hunger_threshold": FORAGING_HUNGER_THRESHOLD,
+        "max_energy_kj": MAX_ENERGY_KJ,
+        "night_rest_light_threshold": NIGHT_REST_LIGHT_THRESHOLD,
+        "night_drain_factor": NIGHT_DRAIN_FACTOR,
+        "day_length_sim_s": DAY_LENGTH_SIM_S,
+        "preen_feather_threshold": PREEN_FEATHER_THRESHOLD,
+        "preen_stop_threshold": PREEN_STOP_THRESHOLD,
+        "feather_decay_rate_s": FEATHER_DECAY_RATE_S,
+        "feather_preen_restore_rate_s": FEATHER_PREEN_RESTORE_RATE_S,
+        "rain_feather_decay_multiplier": RAIN_FEATHER_DECAY_MULTIPLIER,
+        "rain_visibility_factor": RAIN_VISIBILITY_FACTOR,
+        "wind_speed_ms": WIND_SPEED_MS,
+        "wind_flight_mr_multiplier": WIND_FLIGHT_MR_MULTIPLIER,
+        "heat_bmr_multiplier": HEAT_BMR_MULTIPLIER,
+        "memory_slots_max": MEMORY_SLOTS_MAX,
+        "memory_decay_frames": MEMORY_DECAY_FRAMES,
+        "memory_found_dist_m": MEMORY_FOUND_DIST_M,
+        "boid_separation_weight": BOID_SEPARATION_WEIGHT,
+        "boid_alignment_weight": BOID_ALIGNMENT_WEIGHT,
+        "boid_cohesion_weight": BOID_COHESION_WEIGHT,
+        "boid_separation_radius_m": BOID_SEPARATION_RADIUS_M,
+        "boid_neighbor_radius_m": BOID_NEIGHBOR_RADIUS_M,
+        "predator_speed_ms": PREDATOR_SPEED_MS,
+        "predator_detection_radius_m": PREDATOR_DETECTION_RADIUS_M,
+        "predator_contact_distance_m": PREDATOR_CONTACT_DISTANCE_M,
+        "predator_capture_probability": PREDATOR_CAPTURE_PROBABILITY,
+        "predator_lifetime_min_s": PREDATOR_LIFETIME_MIN_S,
+        "predator_lifetime_max_s": PREDATOR_LIFETIME_MAX_S,
+        "predator_catch_busy_s": PREDATOR_CATCH_BUSY_S,
+        "predator_speed_level_min": PREDATOR_SPEED_LEVEL_MIN,
+        "predator_speed_level_max": PREDATOR_SPEED_LEVEL_MAX,
+        "predator_fill_meals_target": PREDATOR_FILL_MEALS_TARGET,
+        "grain_energy_kj": GRAIN_ENERGY_KJ,
+        "world_width_m": WORLD_WIDTH_M,
+        "world_height_m": WORLD_HEIGHT_M,
+        "obs_neighbor_count": OBS_NEIGHBOR_COUNT,
+        "obs_grain_count": OBS_GRAIN_COUNT,
+        "obs_memory_count": OBS_MEMORY_COUNT,
+        "reward_grain": REWARD_GRAIN,
+        "reward_flocking_per_s": REWARD_FLOCKING_PER_S,
+        "reward_starvation_per_s": REWARD_STARVATION_PER_S,
+        "reward_captured": REWARD_CAPTURED,
+        "reward_flee_success": REWARD_FLEE_SUCCESS,
+        "min_population": MIN_POPULATION,
+        // Sampled helper outputs so check_biology.py can verify them without
+        // re-implementing the curves.
+        "sampled": {
+            "vitality_at_0": vitality_at(0.0),
+            "vitality_at_t_mid": vitality_at(VITALITY_T_MID_YEARS),
+            "vitality_at_max": vitality_at(WILD_MAX_LIFESPAN_YEARS),
+            "bmr_at_adult": bmr_for_mass(ADULT_MASS_G),
+            "flight_mr_walking": flight_mr_multiplier(WALK_SPEED_MS),
+            "flight_mr_flying": flight_mr_multiplier(FLY_SPEED_MS),
+        },
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -406,5 +511,26 @@ mod tests {
         assert!((weather_metabolic_multiplier(Weather::Clear, 1.0) - 1.0).abs() < 1e-12);
         assert!((weather_wind_flight_multiplier(Weather::Wind, 1.0) - WIND_FLIGHT_MR_MULTIPLIER).abs() < 1e-12);
         assert!((weather_wind_flight_multiplier(Weather::Wind, 0.0) - 1.0).abs() < 1e-12);
+    }
+
+    /// 6.3 drift gate: the committed `analysis/calibration_export.json` must
+    /// exactly match what `calibration_export_json()` produces right now. Any
+    /// edit to a constant that isn't mirrored in the export fails the release
+    /// gate. Regenerate with `cargo test -p avian_core -- --nocapture` after
+    /// re-exporting (a dedicated `--export-calibration` step writes the file).
+    #[test]
+    fn calibration_export_matches_committed_json() {
+        let current = calibration_export_json();
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../analysis/calibration_export.json"
+        );
+        let committed = std::fs::read_to_string(path).expect("analysis/calibration_export.json missing — regenerate it");
+        let committed_json: serde_json::Value =
+            serde_json::from_str(&committed).expect("committed export is not valid JSON");
+        assert_eq!(
+            current, committed_json,
+            "calibration_export.json drifted from calibration.rs — re-run the calibration export step"
+        );
     }
 }

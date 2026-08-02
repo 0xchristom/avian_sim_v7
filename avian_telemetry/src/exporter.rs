@@ -89,6 +89,10 @@ pub struct TelemetryExporter {
     event_file: Option<std::fs::File>,
     frame_count: u64,
     max_frames: usize,
+    /// 6.2: when `false` the exporter is a no-op — no frames are collected,
+    /// counted or written. The interactive server runs disabled unless a
+    /// telemetry output target is supplied.
+    enabled: bool,
     format: Format,
     /// Per-agent one-frame delay so `next_fsm` is the same uid's next frame.
     pending: HashMap<String, TelemetryFrame>,
@@ -111,6 +115,7 @@ impl TelemetryExporter {
             event_file: None,
             frame_count: 0,
             max_frames,
+            enabled: true,
             format: Format::Csv,
             pending: HashMap::new(),
             reward_count: 0,
@@ -123,6 +128,21 @@ impl TelemetryExporter {
             reward_captured_sum: 0.0,
             reward_flee_sum: 0.0,
         }
+    }
+
+    /// 6.2: a fully inert exporter — used when the server runs without a
+    /// telemetry output target. `push`/`log_event`/`finish` become no-ops and
+    /// `frame_count()` stays 0, so no telemetry is generated at all.
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Self::new(usize::MAX)
+        }
+    }
+
+    /// Whether this exporter will actually collect frames.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Open a CSV file for streaming. Call once at startup.
@@ -151,6 +171,9 @@ impl TelemetryExporter {
 
     /// 2.5: log an injected event with the frame at which it fired.
     pub fn log_event(&mut self, frame: u32, event_json: &str) {
+        if !self.enabled {
+            return;
+        }
         if let Some(file) = &mut self.event_file {
             let _ = writeln!(file, "{},{}", frame, event_json);
         }
@@ -159,6 +182,9 @@ impl TelemetryExporter {
     /// 3.4: push a frame. The frame is written to disk with its `next_fsm`
     /// resolved against the previous stored frame for the same uid.
     pub fn push(&mut self, frame: TelemetryFrame) {
+        if !self.enabled {
+            return;
+        }
         if self.frame_count >= self.max_frames as u64 {
             return; // Stop recording at max_frames instead of dropping old data
         }
@@ -195,6 +221,10 @@ impl TelemetryExporter {
 
     /// 3.4: flush any pending frames (final frame of the run has no next).
     pub fn finish(&mut self) {
+        if !self.enabled {
+            self.pending.clear();
+            return;
+        }
         let drained: Vec<TelemetryFrame> = self.pending.drain().map(|(_, f)| f).collect();
         for mut frame in drained {
             frame.next_fsm.clear();

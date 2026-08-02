@@ -1,6 +1,14 @@
 use nalgebra::Vector2;
 use hecs::Entity;
 
+/// Wrap a raw angle difference into `[-π, π]`. `rem_euclid` is REQUIRED (not
+/// Rust's float `%`, which keeps the dividend's sign): `(x + π) % 2π` yields
+/// values outside [-π, π] whenever `x < -π`, and the FOV gate then rejects
+/// targets that are actually right in front of the pigeon.
+pub fn normalize_angle_relative(angle: f64) -> f64 {
+    (angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
+}
+
 pub fn cone_cast<F: Fn(&Vector2<f64>, f64) -> bool>(
     origin: Vector2<f64>,
     heading: f64,
@@ -20,7 +28,7 @@ pub fn cone_cast<F: Fn(&Vector2<f64>, f64) -> bool>(
         }
         
         let angle = dir.y.atan2(dir.x) - heading;
-        let normalized_angle = ((angle + std::f64::consts::PI) % (2.0 * std::f64::consts::PI)) - std::f64::consts::PI;
+        let normalized_angle = normalize_angle_relative(angle);
         
         if normalized_angle.abs() <= half_fov {
             // 4.3: line-of-sight occlusion — a wall or building on the sight

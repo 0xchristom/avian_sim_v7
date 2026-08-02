@@ -8,3 +8,4 @@ pub mod systems;
 pub mod flocking;
 pub mod predator;
 pub mod weather;
+pub mod metrics;
