@@ -20,6 +20,36 @@ pub fn spawn_grain(sim: &mut Simulation, pos: Vector2<f64>, amount: u32) -> Enti
     sim.spawn_grain_entity(pos, amount)
 }
 
+/// 4.2 spatial memory: upsert a food location at strength 1.0 with a fresh
+/// TTL. If the slot already holds food near the same spot, refresh it (no
+/// duplicate); else append, LRU-evicting the lowest-strength slot at the cap.
+fn remember_food(slots: &mut Vec<MemorySlot>, pos: Vector2<f64>) {
+    let near = slots
+        .iter_mut()
+        .find(|s| (s.pos - pos).norm() < calibration::MEMORY_FOUND_DIST_M);
+    if let Some(slot) = near {
+        slot.pos = pos;
+        slot.strength = 1.0;
+        slot.ttl_frames = calibration::MEMORY_DECAY_FRAMES;
+        return;
+    }
+    if slots.len() >= calibration::MEMORY_SLOTS_MAX {
+        if let Some(idx) = slots
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.strength.partial_cmp(&b.1.strength).unwrap())
+            .map(|(i, _)| i)
+        {
+            slots.remove(idx);
+        }
+    }
+    slots.push(MemorySlot {
+        pos,
+        strength: 1.0,
+        ttl_frames: calibration::MEMORY_DECAY_FRAMES,
+    });
+}
+
 /// Per-agent snapshot captured in the behavior loop and exported to telemetry
 /// after physics, so rewards can include the frame's events (grain eaten,
 /// capture, flee-success).
@@ -79,6 +109,37 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
 
     // 2.2 detection pass: agent → flee direction for any visible predator.
     let threats = predator::collect_threats(sim);
+
+    // 4.2 spatial memory: decay remembered slots and pick each agent's
+    // memory-biased forage target (weighted by strength) BEFORE the main loop,
+    // so the tree tick can consume it without bloating the 15-element query.
+    let mut memory_targets: FxHashMap<Entity, Option<Vector2<f64>>> = FxHashMap::default();
+    for (id, (memory, _)) in sim.world.query_mut::<(&mut MemorySlots, &Position)>() {
+        memory.slots.retain_mut(|slot| {
+            slot.ttl_frames = slot.ttl_frames.saturating_sub(1);
+            slot.strength = slot.ttl_frames as f64 / calibration::MEMORY_DECAY_FRAMES as f64;
+            slot.strength >= calibration::MEMORY_MIN_STRENGTH
+        });
+        let total: f64 = memory.slots.iter().map(|s| s.strength).sum();
+        let target = if total > 0.0 {
+            // Pick the strongest remembered location (weighted by memory
+            // strength; deterministic — no RNG draw, so the shared stream is
+            // not perturbed by the memory pre-pass). Tie-break: most recent.
+            memory
+                .slots
+                .iter()
+                .max_by(|a, b| {
+                    a.strength
+                        .partial_cmp(&b.strength)
+                        .unwrap()
+                        .then(a.ttl_frames.cmp(&b.ttl_frames))
+                })
+                .map(|s| s.pos)
+        } else {
+            None
+        };
+        memory_targets.insert(id, target);
+    }
 
     let tree = build_default_tree();
     let mut commands: Vec<(Entity, Vector2<f64>)> = Vec::new();
@@ -176,6 +237,7 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
             fleeing,
             flee_dir,
             sick,
+            memory_target: memory_targets.get(&id).copied().flatten(),
         };
 
         let _ = tree.tick(&mut ctx);
@@ -269,7 +331,9 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     let mut consumed_set: HashSet<Entity> = HashSet::new();
     let mut consumed_uids: Vec<String> = Vec::new();
     
-    for (_id, (pos, _head, phys_handle, meta, fsm, uid)) in sim.world.query_mut::<(&mut Position, &mut Heading, &PhysicsHandle, &mut Metabolism, &FSMState, &AgentUid)>() {
+    for (_id, (pos, _head, phys_handle, meta, fsm, uid, memory))
+        in sim.world.query_mut::<(&mut Position, &mut Heading, &PhysicsHandle, &mut Metabolism, &FSMState, &AgentUid, &mut MemorySlots)>()
+    {
         if let Some(rb) = sim.physics.get_body(phys_handle.0) {
             let rb_pos = rb.translation();
             pos.0.x = rb_pos.x as f64;
@@ -286,6 +350,10 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
                     meta.energy_kj += calibration::GRAIN_ENERGY_KJ;
                     sim.total_energy_intake_kj += calibration::GRAIN_ENERGY_KJ;
                     consumed_uids.push(uid.0.clone());
+                    // 4.2 spatial memory: committing food to memory is coupled
+                    // to finding it (within MEMORY_FOUND_DIST_M = consumption
+                    // radius). Upsert with strength 1.0, LRU-evict at cap.
+                    remember_food(&mut memory.slots, *g_pos);
                     break;
                 }
             }
@@ -340,8 +408,9 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     }
 
     // 2.4: immigration — keep the population above the minimum.
+    // 4.2: gated by config for deterministic single-bird tests.
     let live = sim.world.query::<&Metabolism>().iter().count();
-    if live < calibration::MIN_POPULATION {
+    if sim.config.immigration_enabled && live < calibration::MIN_POPULATION {
         let missing = calibration::MIN_POPULATION - live;
         for _ in 0..missing {
             let x = sim.rng.gen_range(2.0..30.0);

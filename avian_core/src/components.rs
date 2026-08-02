@@ -144,6 +144,31 @@ pub struct Predator {
     pub lifetime_remaining_s: f64,
 }
 
+/// 4.2 spatial memory: remembered food locations with decaying strength.
+/// Feeds the existing Forage condition as a target-picker (NOT a new condition
+/// node) — when no grain is visible, `foraging_action` picks a slot weighted by
+/// memory strength, else falls through to `Wander`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MemorySlots {
+    pub slots: Vec<MemorySlot>,
+}
+
+/// One remembered food location (4.2). Strength 1.0 on write, decays over
+/// `MEMORY_DECAY_FRAMES`; LRU-evicted at `MEMORY_SLOTS_MAX`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct MemorySlot {
+    pub pos: Vector2<f64>,
+    pub strength: f64,
+    /// Frames until this memory fades (600-frame decay, 4.2).
+    pub ttl_frames: u32,
+}
+
+impl Default for MemorySlots {
+    fn default() -> Self {
+        Self { slots: Vec::new() }
+    }
+}
+
 /// Per-frame threat flag for an agent (2.2 telemetry + obs input).
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Alarm(pub bool);

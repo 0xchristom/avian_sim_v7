@@ -85,7 +85,7 @@ pub fn spawn_agent(
         // registers both correctly.
     ));
     world
-        .insert(e, (Alarm(false), AlarmPrev(false)))
+        .insert(e, (Alarm(false), AlarmPrev(false), MemorySlots::default()))
         .expect("insert alarm components");
     e
 }

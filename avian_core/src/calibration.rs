@@ -132,6 +132,19 @@ pub const SICK_SPEED_MULTIPLIER: f64 = 0.5;
 /// Minimum live population — immigration respawn threshold (2.4).
 pub const MIN_POPULATION: usize = 10;
 
+/// 4.2 spatial memory.
+/// Maximum remembered food locations per agent (LRU-evicted at this cap).
+pub const MEMORY_SLOTS_MAX: usize = 8;
+/// Frames a remembered food location lasts before decaying to zero strength.
+/// At 60 fps ≈ 10 s — enough to revisit a depleted patch that re-seeds.
+pub const MEMORY_DECAY_FRAMES: u32 = 600;
+/// Distance (m) at which food is committed to memory ("food found within
+/// 0.5 m", matching the consumption radius).
+pub const MEMORY_FOUND_DIST_M: f64 = 0.5;
+/// Minimum memory strength for a slot to be a viable forage target; slots
+/// below this are forgotten.
+pub const MEMORY_MIN_STRENGTH: f64 = 0.05;
+
 /// Boids weights (2.1).
 pub const BOID_SEPARATION_WEIGHT: f64 = 1.5;
 pub const BOID_ALIGNMENT_WEIGHT: f64 = 1.0;
@@ -318,5 +331,10 @@ mod tests {
         assert!(REWARD_FLEE_SUCCESS > 0.0);
         assert!(REWARD_FLOCK_NEIGHBORS_MIN >= 2);
         assert!((0.0..1.0).contains(&REWARD_STARVATION_ENERGY_FRACTION));
+        // 4.2 spatial memory: sane bounds.
+        assert!(MEMORY_SLOTS_MAX >= 1);
+        assert!(MEMORY_DECAY_FRAMES > 0);
+        assert!(MEMORY_FOUND_DIST_M > 0.0 && MEMORY_FOUND_DIST_M <= 0.5);
+        assert!((0.0..1.0).contains(&MEMORY_MIN_STRENGTH));
     }
 }

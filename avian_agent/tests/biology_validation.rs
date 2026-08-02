@@ -20,7 +20,7 @@
 
 use avian_core::{Simulation, SimulationConfig};
 use avian_core::calibration;
-use avian_core::components::{FSMState, Position};
+use avian_core::components::{Age, FSMState, Grain, MemorySlot, MemorySlots, Metabolism, Position};
 use avian_core::rng::SimRng;
 use avian_agent::gerontology::sample_age;
 use avian_agent::systems::{run_systems, spawn_grain};
@@ -275,4 +275,95 @@ fn fsm_time_budget_within_literature_bands() {
 
     // Preening must actually be exercised (2.6 in place).
     assert!(preening > 0.0, "preening never occurred in the run");
+}
+
+// ---------------------------------------------------------------------------
+// 7.2.6 Spatial memory improves foraging efficiency (4.2).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn foraging_efficiency_improves_with_spatial_memory() {
+    // 4.2 memory-biased search: a starved bird with NO visible grain but a
+    // remembered food location (pre-seeded slot = "has been here before") must
+    // forage straight toward it, while a memory-less bird has to re-find the
+    // patch by random wandering. Across a fixed seed set (deterministic), the
+    // memory run reaches its first grain strictly faster on aggregate.
+    let first_grain_frame = |with_memory: bool, seed: u64| -> u64 {
+        // Immigration off: the sim would otherwise respawn MIN_POPULATION
+        // agents, whose boids steering perturbs the target bird's straight-line
+        // path and drowns the memory signal in flock noise.
+        let mut config = SimulationConfig::default();
+        config.immigration_enabled = false;
+        let mut sim = Simulation::new(seed, config);
+        let uid = sim.next_uid_str();
+        let e = avian_agent::gerontology::spawn_agent(
+            &mut sim.world,
+            &mut sim.rng,
+            Vector2::new(5.0, 5.0),
+            &mut sim.physics,
+            uid,
+        );
+        // Starve it: force-forage (critical energy) regardless of hunger, and
+        // pin a young age so the random Weibull spawn age can't make this bird
+        // Sick (a sick bird shuffles instead of foraging, adding noise).
+        let mut meta = sim.world.get::<&mut Metabolism>(e).unwrap();
+        meta.energy_kj = 4.0;
+        meta.crop_count = 0;
+        meta.hunger = 0.9;
+        drop(meta);
+        sim.world.get::<&mut Age>(e).unwrap().years = 1.0;
+
+        // Patch beyond vision (15 m > VISION_MAX_RANGE 10 m): cannot just walk
+        // to visible grain — the route must come from memory.
+        let patch = Vector2::new(20.0, 5.0);
+        spawn_grain(&mut sim, patch, 100);
+        if with_memory {
+            sim.world
+                .insert(
+                    e,
+                    (MemorySlots {
+                        slots: vec![MemorySlot {
+                            pos: patch,
+                            strength: 1.0,
+                            ttl_frames: calibration::MEMORY_DECAY_FRAMES,
+                        }],
+                    },),
+                )
+                .unwrap();
+        }
+
+        let mut exporter = TelemetryExporter::new(usize::MAX);
+        for f in 0..3000u64 {
+            let before: u32 = sim
+                .world
+                .query::<&Grain>()
+                .iter()
+                .map(|(_, g)| g.amount)
+                .sum();
+            sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+            let after: u32 = sim
+                .world
+                .query::<&Grain>()
+                .iter()
+                .map(|(_, g)| g.amount)
+                .sum();
+            if after < before {
+                return f;
+            }
+        }
+        3000 // capped — never found the patch
+    };
+
+    // Fixed seed set → deterministic aggregate. The memory bird's straight walk
+    // takes a fixed ~1450 frames (1.2 m/s over 14.5 m, no RNG); the wanderer
+    // rarely reaches the far patch at all, so memory wins decisively overall
+    // even though an occasional seed gets a lucky Levy jump.
+    let seeds = [1u64, 2, 3, 5, 7, 42];
+    let mem_total: u64 = seeds.iter().map(|s| first_grain_frame(true, *s)).sum();
+    let nomem_total: u64 = seeds.iter().map(|s| first_grain_frame(false, *s)).sum();
+    assert!(
+        mem_total < nomem_total,
+        "memory ({mem_total} frames) should reach food faster than no-memory \
+         ({nomem_total} frames) — spatial memory must improve foraging efficiency"
+    );
 }

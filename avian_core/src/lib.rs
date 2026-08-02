@@ -22,6 +22,11 @@ pub struct SimulationConfig {
     /// when it elapses. Headless flee/capture benchmarks disable it to keep a
     /// persistent predator (the two behaviors have separate acceptance tests).
     pub predator_expiry: bool,
+    /// 4.2: when true, immigration respawns keep the population at
+    /// MIN_POPULATION. Deterministic single-bird tests (e.g. memory-biased
+    /// foraging) disable it so no flock is auto-spawned (boids would perturb
+    /// the target bird's straight-line path).
+    pub immigration_enabled: bool,
 }
 
 impl Default for SimulationConfig {
@@ -31,6 +36,7 @@ impl Default for SimulationConfig {
             gravity: 0.0,
             max_agents: 1000,
             predator_expiry: true,
+            immigration_enabled: true,
         }
     }
 }

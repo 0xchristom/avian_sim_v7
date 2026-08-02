@@ -64,6 +64,10 @@ pub struct AgentContext<'a> {
     pub flee_dir: Vector2<f64>,
     // 2.7 debility flag (vitality < SICK_VITALITY_THRESHOLD)
     pub sick: bool,
+    // 4.2 spatial memory: best remembered food location (weighted by strength),
+    // computed in run_systems before the tick. Used only when no grain is
+    // visible (memory-biased search feeds the existing Forage condition).
+    pub memory_target: Option<Vector2<f64>>,
 }
 
 #[derive(Debug)]
@@ -136,10 +140,15 @@ fn critical_energy_condition(ctx: &AgentContext) -> bool {
 
 fn force_forage_action(ctx: &mut AgentContext) -> BTStatus {
     // Force forage even when hunger is low; ignore other non-flee goals.
-    // Falls through to the next child if no food is known.
-    if ctx.grains.is_empty() { return BTStatus::Failure; }
-    *ctx.fsm = FSMState::Foraging;
-    forage_move(ctx)
+    // Falls through to the next child if no food is known (visible or
+    // remembered, 4.2).
+    match pick_forage_target(ctx) {
+        Some(target) => {
+            *ctx.fsm = FSMState::Foraging;
+            forage_move_to(ctx, target)
+        }
+        None => BTStatus::Failure,
+    }
 }
 
 // ---- 2.3 NightRest --------------------------------------------------------
@@ -205,14 +214,33 @@ fn sick_action(ctx: &mut AgentContext) -> BTStatus {
 
 // ---- Forage ---------------------------------------------------------------
 
-fn forage_move(ctx: &mut AgentContext) -> BTStatus {
-    let (_, g_pos, _) = ctx.grains[0];
-    let dist = (g_pos - ctx.pos.0).norm();
+/// 4.2 memory-biased target selection: nearest visible grain first, else the
+/// strongest remembered food location (computed in run_systems), else None.
+/// `None` means the Forage branch fails and the root Selector falls to Wander.
+fn pick_forage_target(ctx: &AgentContext) -> Option<Vector2<f64>> {
+    // Visible grains: nearest one wins (v1 behavior).
+    let mut best: Option<Vector2<f64>> = None;
+    let mut best_d = f64::INFINITY;
+    for (_, g_pos, _) in &ctx.grains {
+        let d = (g_pos - ctx.pos.0).norm();
+        if d < best_d {
+            best_d = d;
+            best = Some(*g_pos);
+        }
+    }
+    if best.is_some() {
+        return best;
+    }
+    // No visible grain → remembered location (4.2).
+    ctx.memory_target
+}
 
+fn forage_move_to(ctx: &mut AgentContext, target: Vector2<f64>) -> BTStatus {
+    let dist = (target - ctx.pos.0).norm();
     if dist < 0.5 {
         ctx.vel.0 = Vector2::zeros();
     } else {
-        let dir = (g_pos - ctx.pos.0).normalize();
+        let dir = (target - ctx.pos.0).normalize();
         ctx.head.0 = dir.y.atan2(dir.x);
         let speed = ctx.mobility.max_speed_ms;
         ctx.vel.0 = Vector2::new(speed * ctx.head.0.cos(), speed * ctx.head.0.sin());
@@ -224,11 +252,16 @@ fn foraging_action(ctx: &mut AgentContext) -> BTStatus {
     // 2.0c: condition is exactly "hungry AND (grain visible OR remembered food
     // exists)". 4.2 plugs memory-biased target selection in here. With no
     // target, this returns Failure so the root falls through to Wander.
-    if ctx.meta.hunger < calibration::FORAGING_HUNGER_THRESHOLD || ctx.grains.is_empty() {
+    if ctx.meta.hunger < calibration::FORAGING_HUNGER_THRESHOLD {
         return BTStatus::Failure;
     }
-    *ctx.fsm = FSMState::Foraging;
-    forage_move(ctx)
+    match pick_forage_target(ctx) {
+        Some(target) => {
+            *ctx.fsm = FSMState::Foraging;
+            forage_move_to(ctx, target)
+        }
+        None => BTStatus::Failure,
+    }
 }
 
 // ---- Wander ---------------------------------------------------------------

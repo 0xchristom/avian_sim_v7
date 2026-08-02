@@ -49,9 +49,10 @@ enum ComponentId {
     Predator,
     Alarm,
     AlarmPrev,
+    MemorySlots,
 }
 
-/// Handles the 18 registered component types (agents, grains, predators).
+/// Handles the 19 registered component types (agents, grains, predators).
 struct WorldContext {
     /// Component IDs seen while deserializing the current archetype, in order.
     components: Vec<ComponentId>,
@@ -60,7 +61,7 @@ struct WorldContext {
 impl Default for WorldContext {
     fn default() -> Self {
         Self {
-            components: Vec::with_capacity(18),
+            components: Vec::with_capacity(19),
         }
     }
 }
@@ -87,6 +88,7 @@ impl SerializeContext for WorldContext {
             A::has::<Predator>,
             A::has::<Alarm>,
             A::has::<AlarmPrev>,
+            A::has::<MemorySlots>,
         ]
         .iter()
         .filter(|f| f(archetype))
@@ -120,6 +122,7 @@ impl SerializeContext for WorldContext {
         try_serialize_id::<Predator, _, _>(archetype, &ComponentId::Predator, &mut out)?;
         try_serialize_id::<Alarm, _, _>(archetype, &ComponentId::Alarm, &mut out)?;
         try_serialize_id::<AlarmPrev, _, _>(archetype, &ComponentId::AlarmPrev, &mut out)?;
+        try_serialize_id::<MemorySlots, _, _>(archetype, &ComponentId::MemorySlots, &mut out)?;
         out.end()
     }
 
@@ -146,6 +149,7 @@ impl SerializeContext for WorldContext {
         try_serialize::<Predator, _>(archetype, &mut out)?;
         try_serialize::<Alarm, _>(archetype, &mut out)?;
         try_serialize::<AlarmPrev, _>(archetype, &mut out)?;
+        try_serialize::<MemorySlots, _>(archetype, &mut out)?;
         out.end()
     }
 }
@@ -180,6 +184,7 @@ impl DeserializeContext for WorldContext {
                 ComponentId::Predator => batch.add::<Predator>(),
                 ComponentId::Alarm => batch.add::<Alarm>(),
                 ComponentId::AlarmPrev => batch.add::<AlarmPrev>(),
+                ComponentId::MemorySlots => batch.add::<MemorySlots>(),
             };
             self.components.push(id);
         }
@@ -246,6 +251,9 @@ impl DeserializeContext for WorldContext {
                 }
                 ComponentId::AlarmPrev => {
                     deserialize_column::<AlarmPrev, _>(entity_count, &mut seq, batch)?
+                }
+                ComponentId::MemorySlots => {
+                    deserialize_column::<MemorySlots, _>(entity_count, &mut seq, batch)?
                 }
             }
         }
