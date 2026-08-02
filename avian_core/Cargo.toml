@@ -10,10 +10,8 @@ rand = { workspace = true }
 rand_chacha = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-bincode = { workspace = true }
-thiserror = { workspace = true }
-hashbrown = { workspace = true }
 smallvec = { workspace = true }
 rustc-hash = { workspace = true }
 rapier2d = { workspace = true }
 avian_physics = { path = "../avian_physics" }
+bincode = { workspace = true }

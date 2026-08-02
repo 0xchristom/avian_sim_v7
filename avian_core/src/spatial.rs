@@ -17,9 +17,15 @@ impl SpatialHashGrid {
     }
 
     fn hash(&self, x: f64, y: f64) -> u64 {
+        // Fix #9: Handle negative coordinates correctly.
+        // Using i64→u64 cast causes hash collisions for negative coords.
+        // Remap to positive space with an offset, then pack.
         let cx = (x / self.cell_size).floor() as i64;
         let cy = (y / self.cell_size).floor() as i64;
-        ((cx as u64) << 32) | (cy as u64 & 0xFFFFFFFF)
+        // Offset by i32::MAX to make all coordinates non-negative before packing.
+        let ox = (cx as i64).wrapping_add(i32::MAX as i64);
+        let oy = (cy as i64).wrapping_add(i32::MAX as i64);
+        ((ox as u64) << 32) | (oy as u64 & 0xFFFFFFFF)
     }
 
     pub fn insert(&mut self, entity: Entity, pos: Vector2<f64>) {
@@ -42,8 +48,19 @@ impl SpatialHashGrid {
         result
     }
 
-    pub fn query_k_nearest(&self, pos: Vector2<f64>, k: usize, positions: &FxHashMap<Entity, Vector2<f64>>) -> Vec<(Entity, f64)> {
-        let mut candidates: Vec<(Entity, f64)> = self.query_radius(pos, 10.0)
+    /// Query k-nearest entities within a bounded radius.
+    /// `positions` is used only to compute distances for entities ALREADY found
+    /// in the grid cells — it never scans the full entity set.
+    /// `k=0` means "return all".
+    pub fn query_k_nearest(
+        &self,
+        pos: Vector2<f64>,
+        k: usize,
+        radius: f64,
+        positions: &FxHashMap<Entity, Vector2<f64>>,
+    ) -> Vec<(Entity, f64)> {
+        let mut candidates: Vec<(Entity, f64)> = self
+            .query_radius(pos, radius)
             .into_iter()
             .filter_map(|e| {
                 positions.get(&e).map(|p| {
@@ -53,12 +70,17 @@ impl SpatialHashGrid {
             })
             .collect();
 
-        // Deterministyczne sortowanie (Ticket 3)
+        // Deterministic sort (tie-broken by entity id) so that parallel
+        // runs of the same seed produce identical ordering.
         candidates.sort_by(|a, b| {
-            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.0.to_bits().get().cmp(&b.0.to_bits().get()))
         });
-        candidates.truncate(k);
+
+        if k > 0 && candidates.len() > k {
+            candidates.truncate(k);
+        }
         candidates
     }
 

@@ -1,10 +1,25 @@
 use hecs::World;
 use avian_core::time::SimulationTime;
 use avian_core::components::*;
+use avian_core::calibration;
 
-pub fn metabolism_system(world: &mut World, time: &SimulationTime) {
+pub fn metabolism_system(
+    world: &mut World,
+    time: &SimulationTime,
+    light_level: f64,
+) -> (f64, f64) {
     let dt = time.dt;
-    
+    let mut total_drained = 0.0;
+    let mut total_digested = 0.0;
+
+    // 2.3: at night (light < threshold) energy drain is reduced to the
+    // calibrated fraction — resting birds metabolize slower.
+    let drain_factor = if light_level < calibration::NIGHT_REST_LIGHT_THRESHOLD {
+        calibration::NIGHT_DRAIN_FACTOR
+    } else {
+        1.0
+    };
+
     for (_id, (meta, vel, mass)) in world.query::<(&mut Metabolism, &Velocity, &Mass)>().iter() {
         let mass_kg = mass.current_g / 1000.0;
         let v_mag = vel.0.norm();
@@ -12,8 +27,10 @@ pub fn metabolism_system(world: &mut World, time: &SimulationTime) {
         let bmr_kj_s = meta.bmr_watts / 1000.0;
         let cot_kj_s = 0.0125 * mass_kg * v_mag;
 
-        meta.energy_kj -= (bmr_kj_s + cot_kj_s) * dt;
-        meta.energy_kj = meta.energy_kj.max(0.0);
+        let drain = (bmr_kj_s + cot_kj_s) * dt * drain_factor;
+        let actual = drain.min(meta.energy_kj);
+        meta.energy_kj -= actual;
+        total_drained += actual;
 
         // Trawienie
         if meta.crop_count > 0 && meta.gizzard_count < 10 {
@@ -25,6 +42,7 @@ pub fn metabolism_system(world: &mut World, time: &SimulationTime) {
             let energy_from_food = to_transfer as f64 * 0.5;
             let tef_loss = 0.1 * energy_from_food;
             meta.energy_kj += energy_from_food - tef_loss;
+            total_digested += energy_from_food - tef_loss;
         }
 
         let blood_glucose = meta.gizzard_count as f64 * 0.5;
@@ -43,4 +61,6 @@ pub fn metabolism_system(world: &mut World, time: &SimulationTime) {
             meta.hunger = meta.hunger.max(0.8);
         }
     }
+
+    (total_drained, total_digested)
 }

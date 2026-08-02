@@ -1,0 +1,79 @@
+{
+  "generated_at": "2026-08-02T15:19:49Z",
+  "obs_schema": "obs_v1",
+  "obs_layout": [
+    [
+      "[0..2]",
+      "pos (normalized to world size)"
+    ],
+    [
+      "[2..4]",
+      "heading (sin + cos)"
+    ],
+    [
+      "[4]",
+      "velocity magnitude"
+    ],
+    [
+      "[5]",
+      "energy (normalized)"
+    ],
+    [
+      "[6]",
+      "hunger"
+    ],
+    [
+      "[7]",
+      "age (normalized to WILD_MAX_LIFESPAN_YEARS)"
+    ],
+    [
+      "[8]",
+      "vitality"
+    ],
+    [
+      "[9]",
+      "light_level"
+    ],
+    [
+      "[10..16]",
+      "nearest 3 grains rel pos (2 each)"
+    ],
+    [
+      "[16..37]",
+      "7 neighbors rel pos + dist (3 each)"
+    ],
+    [
+      "[37..43]",
+      "predator rel pos + threat + alarm_flag (+2 reserved)"
+    ],
+    [
+      "[43..51]",
+      "memory locations (4.2 — all zero until it ships)"
+    ],
+    [
+      "[51..127]",
+      "reserved — all zero (future fields without renumbering)"
+    ],
+    [
+      "[127]",
+      "unused (kept zero)"
+    ]
+  ],
+  "seed": 42,
+  "config": {
+    "dt": 0.008333333333333333,
+    "gravity": 0.0,
+    "max_agents": 1000,
+    "predator_expiry": true
+  },
+  "initial_agents": 30,
+  "world_size_m": [
+    32.0,
+    21.0
+  ],
+  "sim_frames": 0,
+  "events_injected": [],
+  "reward_stats": null,
+  "rust_version": "unknown",
+  "commit": "3d93777"
+}

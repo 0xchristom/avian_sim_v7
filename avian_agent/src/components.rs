@@ -1,1 +1,0 @@
-// Wszystkie komponenty zostały przeniesione do avian_core::components w ramach re-architektury.

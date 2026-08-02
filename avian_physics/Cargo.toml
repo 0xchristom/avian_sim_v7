@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 rapier2d = { workspace = true }
 nalgebra = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }

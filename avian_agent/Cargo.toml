@@ -15,7 +15,11 @@ avian_physics = { path = "../avian_physics" }
 avian_telemetry = { path = "../avian_telemetry" }
 tungstenite = { workspace = true }
 rustc-hash = { workspace = true }
+ctrlc = { workspace = true } # Dodano brakującą zależność
 
 [[bin]]
 name = "sim_server"
 path = "src/bin/sim_server.rs"
+
+[dev-dependencies]
+bincode = { workspace = true }

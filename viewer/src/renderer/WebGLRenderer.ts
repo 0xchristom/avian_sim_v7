@@ -7,16 +7,20 @@ export class WebGLRenderer {
   private birdBodyMesh: THREE.InstancedMesh;
   private birdHeadMesh: THREE.InstancedMesh;
   private grainMesh: THREE.InstancedMesh;
-  
+  private predatorMesh: THREE.InstancedMesh;
+  private nightOverlay: THREE.Mesh;
+  private predatorLabels: THREE.Sprite[] = [];
+  private selectionMarkers: THREE.Mesh[] = [];
+
   constructor(canvas: HTMLCanvasElement) {
     this.scene = new THREE.Scene();
     this.camera = new THREE.OrthographicCamera(0, 32, 21, 0, 0.1, 1000);
     this.camera.position.z = 10;
-    
+
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     this.renderer.setSize(800, 533);
     this.renderer.setClearColor(0x1a1c25);
-    
+
     const grid = new THREE.GridHelper(64, 64, 0x333333, 0x222222);
     grid.rotation.x = Math.PI / 2;
     grid.position.set(16, 10.5, -1);
@@ -39,25 +43,45 @@ export class WebGLRenderer {
     this.grainMesh = new THREE.InstancedMesh(grainGeom, grainMat, 1000);
     this.grainMesh.frustumCulled = false;
     this.scene.add(this.grainMesh);
+
+    // 2.2: predators rendered as larger red triangles (hawk).
+    const predGeom = new THREE.CircleGeometry(0.55, 16);
+    const predMat = new THREE.MeshBasicMaterial({ color: 0xff2222 });
+    this.predatorMesh = new THREE.InstancedMesh(predGeom, predMat, 64);
+    this.predatorMesh.frustumCulled = false;
+    this.scene.add(this.predatorMesh);
+
+    // 2.3: black full-screen overlay; opacity = 1 - light_level → dims at night.
+    const overlayMat = new THREE.MeshBasicMaterial({
+      color: 0x000000,
+      transparent: true,
+      opacity: 0,
+      depthTest: false,
+    });
+    this.nightOverlay = new THREE.Mesh(new THREE.PlaneGeometry(32, 21), overlayMat);
+    this.nightOverlay.position.set(16, 10.5, 5);
+    this.nightOverlay.renderOrder = 999;
+    this.scene.add(this.nightOverlay);
   }
 
-  render(snapshot: any) {
+  render(snapshot: any, selectedUids: string[] = []) {
     if (!snapshot || !snapshot.agents) return;
-    
+
     const dummyBody = new THREE.Object3D();
     const dummyHead = new THREE.Object3D();
     const dummyGrain = new THREE.Object3D();
-    
+    const dummyPred = new THREE.Object3D();
+
     snapshot.agents.forEach((agent: any, i: number) => {
       const angle = agent.heading;
       const massScale = agent.mass_g ? agent.mass_g / 315.0 : 1.0;
-      
+
       dummyBody.position.set(agent.pos[0], agent.pos[1], 0);
       dummyBody.rotation.z = angle;
-      dummyBody.scale.set(1.0 * massScale, 0.6 * massScale, 1.0); 
+      dummyBody.scale.set(1.0 * massScale, 0.6 * massScale, 1.0);
       dummyBody.updateMatrix();
       this.birdBodyMesh.setMatrixAt(i, dummyBody.matrix);
-      
+
       const headX = agent.pos[0] + Math.cos(angle) * 0.45 + (agent.head_offset ? agent.head_offset[0] : 0);
       const headY = agent.pos[1] + Math.sin(angle) * 0.45 + (agent.head_offset ? agent.head_offset[1] : 0);
       dummyHead.position.set(headX, headY, 0.1);
@@ -66,7 +90,7 @@ export class WebGLRenderer {
       dummyHead.updateMatrix();
       this.birdHeadMesh.setMatrixAt(i, dummyHead.matrix);
     });
-    
+
     this.birdBodyMesh.count = snapshot.agents.length;
     this.birdHeadMesh.count = snapshot.agents.length;
     this.birdBodyMesh.instanceMatrix.needsUpdate = true;
@@ -74,7 +98,7 @@ export class WebGLRenderer {
 
     if (snapshot.grains) {
       snapshot.grains.forEach((g: any, i: number) => {
-        dummyGrain.position.set(g[0][0], g[0][1], 0);
+        dummyGrain.position.set(g[0], g[1], 0);
         dummyGrain.scale.set(1, 1, 1);
         dummyGrain.updateMatrix();
         this.grainMesh.setMatrixAt(i, dummyGrain.matrix);
@@ -82,7 +106,88 @@ export class WebGLRenderer {
       this.grainMesh.count = snapshot.grains.length;
       this.grainMesh.instanceMatrix.needsUpdate = true;
     }
-    
+
+    if (snapshot.predators) {
+      snapshot.predators.forEach((p: any, i: number) => {
+        dummyPred.position.set(p.pos[0], p.pos[1], 0.2);
+        dummyPred.scale.set(1, 1, 1);
+        dummyPred.updateMatrix();
+        this.predatorMesh.setMatrixAt(i, dummyPred.matrix);
+      });
+      this.predatorMesh.count = snapshot.predators.length;
+      this.predatorMesh.instanceMatrix.needsUpdate = true;
+    }
+
+    // 2.2b: countdown label (remaining seconds, small font) beside each predator.
+    this.updatePredatorLabels(snapshot.predators || []);
+
+    // Marking tool: green ring around every selected agent/predator.
+    this.updateSelectionMarkers(snapshot, selectedUids);
+
+    // 2.3: dim toward night — light_level 1.0 (noon) → overlay 0, 0.1 → 0.9.
+    if (typeof snapshot.light_level === 'number') {
+      const mat = this.nightOverlay.material as THREE.MeshBasicMaterial;
+      mat.opacity = Math.max(0, 1 - snapshot.light_level);
+    }
+
     this.renderer.render(this.scene, this.camera);
+  }
+
+  private updatePredatorLabels(predators: Array<{ pos: [number, number]; lifetime_remaining_s: number }>) {
+    for (const label of this.predatorLabels) {
+      this.scene.remove(label);
+      label.material.map?.dispose();
+      label.material.dispose();
+    }
+    this.predatorLabels = [];
+
+    predators.forEach((p) => {
+      const seconds = Math.max(0, p.lifetime_remaining_s ?? 0).toFixed(1);
+      const canvas = document.createElement('canvas');
+      canvas.width = 96;
+      canvas.height = 40;
+      const g = canvas.getContext('2d')!;
+      g.clearRect(0, 0, canvas.width, canvas.height);
+      g.font = 'bold 28px monospace';
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      g.fillStyle = '#000';
+      g.fillText(seconds, 48, 20);
+      g.fillStyle = '#ffffff';
+      g.fillText(seconds, 47, 19);
+
+      const texture = new THREE.CanvasTexture(canvas);
+      const mat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+      const sprite = new THREE.Sprite(mat);
+      sprite.position.set(p.pos[0] + 0.9, p.pos[1] + 0.9, 1);
+      sprite.scale.set(1.1, 0.46, 1);
+      sprite.renderOrder = 1000;
+      this.scene.add(sprite);
+      this.predatorLabels.push(sprite);
+    });
+  }
+
+  private updateSelectionMarkers(snapshot: any, selectedUids: string[]) {
+    for (const m of this.selectionMarkers) {
+      this.scene.remove(m);
+      m.geometry.dispose();
+      (m.material as THREE.Material).dispose();
+    }
+    this.selectionMarkers = [];
+    if (selectedUids.length === 0) return;
+
+    const selected = new Map<string, [number, number]>();
+    (snapshot.agents || []).forEach((a: any) => { if (selectedUids.includes(a.uid)) selected.set(a.uid, a.pos); });
+    (snapshot.predators || []).forEach((p: any) => { if (selectedUids.includes(p.uid)) selected.set(p.uid, p.pos); });
+
+    const ringGeom = new THREE.RingGeometry(0.62, 0.72, 24);
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, transparent: true, opacity: 0.9, depthTest: false });
+    selected.forEach((pos) => {
+      const ring = new THREE.Mesh(ringGeom, ringMat);
+      ring.position.set(pos[0], pos[1], 0.6);
+      ring.renderOrder = 999;
+      this.scene.add(ring);
+      this.selectionMarkers.push(ring);
+    });
   }
 }

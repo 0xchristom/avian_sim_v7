@@ -10,7 +10,9 @@ pub struct VaultingGait {
 
 impl VaultingGait {
     pub fn com_height(&self, phase: f64) -> f64 {
-        let t = phase / self.duty_factor;
+        // Fix #11: Clamp phase to duty_factor so t stays in [0, 1].
+        // Previously t could exceed 1.0 → t*(1-t) negative → COM height > leg length.
+        let t = (phase / self.duty_factor).clamp(0.0, 1.0);
         self.leg_length_m * (1.0 - 0.2 * t * (1.0 - t))
     }
     
@@ -40,7 +42,9 @@ impl HeadBobSystem {
         
         let mut offset = Vector2::zeros();
         
-        if optic_flow < 3.0 {
+        // Fix: threshold was 3.0 but max speed is 1.2 m/s — head bob never activated.
+        // Real pigeons head-bob at walking speeds (~0.3 m/s and above).
+        if optic_flow < 0.3 {
             self.current_phase = HeadBobPhase::Hold;
             self.time_in_phase = 0.0;
         } else {
