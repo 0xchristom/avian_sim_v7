@@ -386,8 +386,14 @@ mod tests {
         // iteration order is seeded per-process — so the final-frame lines can
         // appear in a different (equally valid) order between two runs. Compare
         // the sorted line sets: same rows, same content, order-independent.
-        let mut lines_b: Vec<&[u8]> = bytes_b.split(|b| *b == b'\n').filter(|l| !l.is_empty()).collect();
-        let mut lines_d: Vec<&[u8]> = bytes_d.split(|b| *b == b'\n').filter(|l| !l.is_empty()).collect();
+        let mut lines_b: Vec<&[u8]> = bytes_b
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .collect();
+        let mut lines_d: Vec<&[u8]> = bytes_d
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .collect();
         lines_b.sort();
         lines_d.sort();
         assert_eq!(

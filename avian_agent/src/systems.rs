@@ -88,7 +88,7 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     // (ground-truth annotations) and application result (Sprint 5: no-ops are
     // recorded, not reported as success).
     for (frame, ev, outcome) in sim.events_log.drain(..) {
-        let mut payload = match serde_json::to_value(&ev) {
+        let payload = match serde_json::to_value(&ev) {
             Ok(serde_json::Value::Object(mut obj)) => {
                 if outcome == avian_core::events::EventOutcome::NoOp {
                     obj.insert("noop".to_string(), serde_json::Value::Bool(true));

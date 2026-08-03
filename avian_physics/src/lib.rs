@@ -38,8 +38,8 @@ impl StaticObstacleBroadphase {
     fn cell_of(&self, x: f64, y: f64) -> (i64, i64) {
         let cx = (x / self.cell_size).floor() as i64;
         let cy = (y / self.cell_size).floor() as i64;
-        let ox = (cx as i64).wrapping_add(i32::MAX as i64);
-        let oy = (cy as i64).wrapping_add(i32::MAX as i64);
+        let ox = cx.wrapping_add(i32::MAX as i64);
+        let oy = cy.wrapping_add(i32::MAX as i64);
         (ox, oy)
     }
 
@@ -503,5 +503,11 @@ impl PhysicsWorld {
             static_broadphase,
             los_raycast_count: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+}
+
+impl Default for PhysicsWorld {
+    fn default() -> Self {
+        Self::new()
     }
 }
