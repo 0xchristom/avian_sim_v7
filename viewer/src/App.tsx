@@ -85,9 +85,38 @@ const App: React.FC = () => {
     };
   }, [setSnapshot, appendEvents, setMetrics]);
 
+  // Audit 3 Phase 4: continuous requestAnimationFrame render loop. It reads the
+  // store's double buffer (previous/current snapshot + arrival timestamps) via
+  // getState(), so React is never re-rendered by the loop — the renderer
+  // lerps/slerps positions and headings between the two snapshots, keeping a
+  // smooth ~60fps even when the server drops frames or WS packets burst.
+  const selectedUidsRef = useRef<string[]>(selectedUids);
+  useEffect(() => { selectedUidsRef.current = selectedUids; }, [selectedUids]);
+  const hoveredUidRef = useRef<string | null>(hoveredUid);
+  useEffect(() => { hoveredUidRef.current = hoveredUid; }, [hoveredUid]);
+
   useEffect(() => {
-    if (rendererRef.current && snapshot) { rendererRef.current.render(snapshot, selectedUids, hoveredUid || undefined); }
-  }, [snapshot, selectedUids, hoveredUid]);
+    let raf = 0;
+    const loop = () => {
+      const r = rendererRef.current;
+      if (r) {
+        const st = useSimulationStore.getState();
+        if (st.snapshot) {
+          r.render(
+            st.snapshot,
+            st.previousSnapshot,
+            st.lastReceivedAt,
+            st.currentReceivedAt,
+            selectedUidsRef.current,
+            hoveredUidRef.current || undefined,
+          );
+        }
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, []);
 
   const sendControl = (command: string, value?: number) => {
     const msg: Record<string, unknown> = { command };

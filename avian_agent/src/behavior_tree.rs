@@ -8,6 +8,7 @@
 //!     Sick,              // 2.7 — debility; a sick bird still evades a predator
 //!     CriticalEnergy,    // 2.0 — energy < threshold → force forage
 //!     NightRest,         // 2.3 — light < 0.3 → rest (stop moving, reduced drain)
+//!     Glide,             // Phase 9 — airborne in a building thermal, aligned with updraft
 //!     Preen,             // 2.6 — feathers_condition < threshold
 //!     Forage,            // existing — hunger > 0.4 (memory-biased target, 4.2)
 //!     Wander             // existing — Levy/CRW spacer
@@ -72,6 +73,8 @@ pub struct AgentContext<'a> {
     // `run_systems` fills it from `SimulationConfig::foraging_threshold`
     // (default = the biology constant FORAGING_HUNGER_THRESHOLD).
     pub forage_hunger_threshold: f64,
+    // Phase 9 (Audit 3): building-thermal updraft zones (from `sim.thermals`).
+    pub thermals: &'a [ThermalZone],
 }
 
 #[derive(Debug)]
@@ -193,9 +196,7 @@ fn preen_action(ctx: &mut AgentContext) -> BTStatus {
 
 fn sick_condition(ctx: &AgentContext) -> bool {
     ctx.sick
-}
-
-fn sick_action(ctx: &mut AgentContext) -> BTStatus {
+}fn sick_action(ctx: &mut AgentContext) -> BTStatus {
     // Debilitated: impaired slow forage toward the nearest visible grain, else
     // a slow shuffle. The 50% velocity cut is applied in run_systems so it
     // also slows fleeing (→ more vulnerable to predators). This branch sits
@@ -294,6 +295,45 @@ fn spacer_action(ctx: &mut AgentContext) -> BTStatus {
     BTStatus::Running
 }
 
+// ---- Phase 9 Glide (building thermals) -------------------------------------
+
+/// Phase 9 (Audit 3): the Glide condition — the bird is inside a
+/// building-thermal updraft zone and its heading aligns with the updraft
+/// `flow` vector. The sim has no voluntary flight outside Fleeing (which
+/// outranks this branch), so the thermal itself provides the launch: a pigeon
+/// walking the sun-facing wall whose heading matches the rising airflow takes
+/// off and soars — the updraft carries it aloft. Gliding then sets the
+/// airborne speed and collapses MR to near-zero (see `glide_action`).
+fn glide_condition(ctx: &AgentContext) -> bool {
+    let heading = Vector2::new(ctx.head.0.cos(), ctx.head.0.sin());
+    let max_align = calibration::GLIDE_HEADING_ALIGN_DEG.to_radians();
+    for t in ctx.thermals {
+        if ctx.pos.0.x < t.min.x || ctx.pos.0.x > t.max.x {
+            continue;
+        }
+        if ctx.pos.0.y < t.min.y || ctx.pos.0.y > t.max.y {
+            continue;
+        }
+        let cos_ang = (heading.dot(&t.flow)).clamp(-1.0, 1.0);
+        if cos_ang >= max_align.cos() {
+            return true;
+        }
+    }
+    false
+}
+
+fn glide_action(ctx: &mut AgentContext) -> BTStatus {
+    *ctx.fsm = FSMState::Gliding;
+    // Soar the updraft: cruise straight along the current heading at
+    // GLIDE_SPEED_MS. MR collapses to GLIDE_MR_MULTIPLIER (applied in the
+    // drain systems); steering agility is restricted in run_systems.
+    ctx.vel.0 = Vector2::new(
+        calibration::GLIDE_SPEED_MS * ctx.head.0.cos(),
+        calibration::GLIDE_SPEED_MS * ctx.head.0.sin(),
+    );
+    BTStatus::Running
+}
+
 pub fn build_default_tree() -> Box<dyn BTNode> {
     Box::new(Selector {
         children: vec![
@@ -318,6 +358,16 @@ pub fn build_default_tree() -> Box<dyn BTNode> {
                 children: vec![
                     Box::new(Condition(night_rest_condition)),
                     Box::new(Action(night_rest_action)),
+                ],
+            }),
+            // Phase 9 — Glide: airborne + inside a building thermal + heading
+            // aligned with the updraft. Overrides Preen/Forage/Wander (a bird
+            // riding a thermal cannot forage or groom), but sits below the
+            // survival branches (Flee/Sick/CriticalEnergy/NightRest).
+            Box::new(Sequence {
+                children: vec![
+                    Box::new(Condition(glide_condition)),
+                    Box::new(Action(glide_action)),
                 ],
             }),
             // 2.6 Preen — feathers below threshold.

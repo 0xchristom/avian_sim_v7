@@ -75,7 +75,16 @@ export interface Metrics {
 }
 
 interface SimStore {
+  // Audit 3 Phase 4: double-buffered snapshots. When a new WS snapshot lands,
+  // `snapshot` becomes `previousSnapshot` and the new one becomes `snapshot`.
+  // `lastReceivedAt`/`currentReceivedAt` (performance.now()) bracket the two
+  // arrivals so the renderer can derive an interpolation alpha that trails the
+  // real-time clock by one inter-arrival interval (smooth 60fps even when the
+  // server drops frames or WS packets arrive in bursts).
   snapshot: SimulationSnapshot | null;
+  previousSnapshot: SimulationSnapshot | null;
+  lastReceivedAt: number;
+  currentReceivedAt: number;
   setSnapshot: (s: SimulationSnapshot) => void;
   eventLog: EventLogEntry[];
   // 6.1: append scenario events (from `{"type":"event_log",...}` WS messages).
@@ -86,7 +95,19 @@ interface SimStore {
 
 export const useSimulationStore = create<SimStore>((set) => ({
   snapshot: null,
-  setSnapshot: (s) => set({ snapshot: s }),
+  previousSnapshot: null,
+  lastReceivedAt: 0,
+  currentReceivedAt: 0,
+  setSnapshot: (s) =>
+    set((state) => {
+      const now = performance.now();
+      return {
+        snapshot: s,
+        previousSnapshot: state.snapshot,
+        lastReceivedAt: state.snapshot ? state.currentReceivedAt : 0,
+        currentReceivedAt: now,
+      };
+    }),
   eventLog: [],
   appendEvents: (frame, events) => {
     if (!events || events.length === 0) return;

@@ -43,7 +43,13 @@ fn main() {
 
 fn bench_agents(n: usize, frames: u64) {
     let mut sim = Simulation::new(42, SimulationConfig::default());
-    let mut exporter = TelemetryExporter::new(usize::MAX);
+    // Audit 3 (Phase 1): `BENCH_DISABLED=1` measures the pure simulation cost
+    // with telemetry fully inert (the intended headless/paused-RLHF mode).
+    let mut exporter = if std::env::var("BENCH_DISABLED").is_ok() {
+        TelemetryExporter::disabled()
+    } else {
+        TelemetryExporter::new(usize::MAX)
+    };
     for _ in 0..n {
         let x = sim.rng.gen_range(2.0..30.0);
         let y = sim.rng.gen_range(2.0..19.0);
@@ -107,8 +113,7 @@ fn bench_physics(n: usize, frames: u64) {
     println!("physics-only {n} bodies: {ms_per_frame:.3} ms/frame");
 }
 
-fn bench_export(n: usize) {
-    let frame = |i: usize| TelemetryFrame {
+fn bench_export(n: usize) {    let frame = |i: usize| TelemetryFrame {
         time_us: i as u64 * 8333,
         frame: i as u32,
         uid: format!("A{:04}-{:06}", 1, i % 1000),

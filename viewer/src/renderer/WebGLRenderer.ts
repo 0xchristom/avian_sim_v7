@@ -111,6 +111,23 @@ export class WebGLRenderer {
     return new THREE.ShapeGeometry(s);
   }
 
+  // Audit 3 Phase 4: interpolate one entity between the previous and current
+  // WS snapshots at alpha ∈ [0,1]. Position is lerped; heading is slerped
+  // (shortest-arc) so a bird spinning past ±π never whips the long way around.
+  // Returns a lightweight copy of the current snapshot entry carrying the
+  // interpolated pos/heading — every other field is shared, not cloned.
+  private static resolveAgent(prev: any, curr: any, alpha: number): any {
+    const pos: [number, number] = [
+      prev.pos[0] + (curr.pos[0] - prev.pos[0]) * alpha,
+      prev.pos[1] + (curr.pos[1] - prev.pos[1]) * alpha,
+    ];
+    const twoPi = Math.PI * 2;
+    let d = curr.heading - prev.heading;
+    d = (((d + Math.PI) % twoPi) + twoPi) % twoPi - Math.PI; // wrap to (-π, π]
+    const heading = prev.heading + d * alpha;
+    return { ...curr, pos, heading };
+  }
+
   constructor(canvas: HTMLCanvasElement) {
     this.scene = new THREE.Scene();
     this.camera = new THREE.OrthographicCamera(0, 32, 21, 0, 0.1, 1000);
@@ -328,14 +345,51 @@ export class WebGLRenderer {
     mesh.count = capacity;
   }
 
-  render(snapshot: any, selectedUids: string[] = [], hoveredUid?: string) {
+  render(
+    snapshot: any,
+    previousSnapshot: any = null,
+    lastReceivedAt: number = 0,
+    currentReceivedAt: number = 0,
+    selectedUids: string[] = [],
+    hoveredUid?: string,
+  ) {
     if (!snapshot || !snapshot.agents) return;
 
-    // 6.5: advance the animation clock at real time (wings/peck pulse).
+    // 6.5: advance the animation clock at real time (wings/peck pulses).
     const now = performance.now();
     this.animTime += Math.min(0.05, (now - this.lastFrameMs) / 1000);
     this.lastFrameMs = now;
     const t = this.animTime;
+
+    // Audit 3 Phase 4: network interpolation. Trailing the real-time clock by
+    // one inter-arrival interval means `renderTime` always falls between the
+    // two received snapshots, so entities glide continuously instead of
+    // snapping to each WS packet. Clamped to [0,1] — never extrapolate past
+    // the current snapshot (a dead/late network just holds the last pose).
+    const inter = currentReceivedAt - lastReceivedAt;
+    const alpha = previousSnapshot && inter > 0
+      ? Math.min(1, Math.max(0, (now - lastReceivedAt - inter) / inter))
+      : 1;
+
+    const prevAgents = new Map<string, any>();
+    if (previousSnapshot) {
+      for (const a of previousSnapshot.agents || []) prevAgents.set(a.uid, a);
+    }
+    const resolvedAgents = snapshot.agents.map((a: any) => {
+      const p = prevAgents.get(a.uid);
+      if (!p || alpha >= 1) return a;
+      return WebGLRenderer.resolveAgent(p, a, alpha);
+    });
+
+    const prevPreds = new Map<string, any>();
+    if (previousSnapshot) {
+      for (const pp of previousSnapshot.predators || []) prevPreds.set(pp.uid, pp);
+    }
+    const resolvedPredators = (snapshot.predators || []).map((pp: any) => {
+      const p = prevPreds.get(pp.uid);
+      if (!p || alpha >= 1) return pp;
+      return WebGLRenderer.resolveAgent(p, pp, alpha);
+    });
 
     // 6.6: grow instance capacity once (if the population exceeded the pool).
     const n = snapshot.agents.length;
@@ -360,7 +414,7 @@ export class WebGLRenderer {
     // 6.5: nearest-grain distance per agent (for the peck trigger).
     const grains = snapshot.grains || [];
 
-    snapshot.agents.forEach((agent: any, i: number) => {
+    resolvedAgents.forEach((agent: any, i: number) => {
       const angle = agent.heading;
       const mass = agent.mass_g ? agent.mass_g / 315.0 : 1.0;
       const bob = agent.head_offset || [0, 0];
@@ -462,7 +516,7 @@ export class WebGLRenderer {
 
     // 6.6: prune cache entries for agents that left the sim (stale UIDs).
     if (this.agentCache.size > n) {
-      const live = new Set(snapshot.agents.map((a: any) => a.uid));
+      const live = new Set(resolvedAgents.map((a: any) => a.uid));
       for (const uid of this.agentCache.keys()) {
         if (!live.has(uid)) this.agentCache.delete(uid);
       }
@@ -503,7 +557,7 @@ export class WebGLRenderer {
     }
 
     if (snapshot.predators) {
-      snapshot.predators.forEach((p: any, i: number) => {
+      resolvedPredators.forEach((p: any, i: number) => {
         const cachedPred = this.predCache.get(p.uid);
         if (cachedPred && cachedPred[0] === p.pos[0] && cachedPred[1] === p.pos[1]) return;
         this.predCache.set(p.uid, [p.pos[0], p.pos[1]]);
@@ -517,7 +571,7 @@ export class WebGLRenderer {
     }
 
     // 2.2b: countdown label (remaining seconds, small font) beside each predator.
-    this.updatePredatorLabels(snapshot.predators || []);
+    this.updatePredatorLabels(resolvedPredators);
 
     // 4.3: draw the static urban obstacles.
     this.updateObstacles(snapshot.obstacles || []);
@@ -525,17 +579,17 @@ export class WebGLRenderer {
     // 6.1: flock neighbor connection lines between nearby agents. Audit 2
     // Task 2: skip the O(n²) pair scan entirely when the lines are hidden.
     if (this.neighborLinesVisible) {
-      this.updateNeighborLines(snapshot.agents || []);
+      this.updateNeighborLines(resolvedAgents);
     }
 
     // 6.1: memory dots — remembered food as fading dots per agent.
-    this.updateMemoryDots(snapshot.agents || []);
+    this.updateMemoryDots(resolvedAgents);
 
     // Marking tool: green ring around every selected agent/predator.
-    this.updateSelectionMarkers(snapshot, selectedUids);
+    this.updateSelectionMarkers(resolvedAgents, resolvedPredators, selectedUids);
 
     // 6.1: FOV cone for the hovered + selected agents (agent head direction).
-    this.updateFovCones(snapshot.agents || [], selectedUids, hoveredUid);
+    this.updateFovCones(resolvedAgents, selectedUids, hoveredUid);
 
     // 2.3: dim toward night — light_level 1.0 (noon) → overlay 0, 0.1 → 0.9.
     if (typeof snapshot.light_level === 'number') {
@@ -735,7 +789,7 @@ export class WebGLRenderer {
     }
   }
 
-  private updateSelectionMarkers(snapshot: any, selectedUids: string[]) {
+  private updateSelectionMarkers(agents: any[], predators: any[], selectedUids: string[]) {
     for (const m of this.selectionMarkers) {
       this.scene.remove(m);
       m.geometry.dispose();
@@ -745,8 +799,8 @@ export class WebGLRenderer {
     if (selectedUids.length === 0) return;
 
     const selected = new Map<string, [number, number]>();
-    (snapshot.agents || []).forEach((a: any) => { if (selectedUids.includes(a.uid)) selected.set(a.uid, a.pos); });
-    (snapshot.predators || []).forEach((p: any) => { if (selectedUids.includes(p.uid)) selected.set(p.uid, p.pos); });
+    (agents || []).forEach((a: any) => { if (selectedUids.includes(a.uid)) selected.set(a.uid, a.pos); });
+    (predators || []).forEach((p: any) => { if (selectedUids.includes(p.uid)) selected.set(p.uid, p.pos); });
 
     const ringGeom = new THREE.RingGeometry(0.62, 0.72, 24);
     const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, transparent: true, opacity: 0.9, depthTest: false });

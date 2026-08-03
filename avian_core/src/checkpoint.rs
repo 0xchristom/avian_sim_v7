@@ -23,6 +23,7 @@ use hecs::serialize::column::{
     try_serialize, try_serialize_id, deserialize_column, DeserializeContext, SerializeContext,
 };
 use hecs::{ColumnBatchBuilder, ColumnBatchType};
+use rustc_hash::FxHashMap;
 use serde::{Serialize, Deserialize};
 
 /// One variant per component type registered in the world. Adding a new
@@ -261,6 +262,31 @@ impl DeserializeContext for WorldContext {
     }
 }
 
+/// Audit 3 (Phase 2): checkpoint-safe form of the per-agent neighbor cache.
+/// Agent references are stored as ordinals into the world's agent query order
+/// (`query::<(&AgentUid, &Metabolism)>()`), which the column round-trip
+/// preserves 1:1, so they remap cleanly to restored entities.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct NeighborCacheSer {
+    pub agent: usize,
+    pub neighbors: Vec<usize>,
+    pub last_count: usize,
+    pub last_vel: [f64; 2],
+}
+
+/// Audit 3 (Phase 2): checkpoint-safe form of the per-agent visible-grain
+/// cache. `agent` is an ordinal into the agent query order; `visible` entries
+/// carry grain ordinals (into `query::<&Grain>()` order).
+#[derive(Serialize, Deserialize, Clone)]
+pub struct GrainVisCacheSer {
+    pub agent: usize,
+    pub pos: [f64; 2],
+    pub heading: f64,
+    pub vision_range: f64,
+    pub grains_version: u64,
+    pub visible: Vec<(usize, [f64; 2], u32)>,
+}
+
 /// Complete checkpoint: everything needed to resume a run exactly.
 ///
 /// `world` is stored as bincode bytes (serialized separately through the
@@ -290,9 +316,14 @@ pub struct Checkpoint {
     /// they travel in the checkpoint instead of a component column.
     pub obstacles: Vec<Obstacle>,
     pub world_bytes: Vec<u8>,
+    /// Audit 3 (Phase 2): transient phase-2 caches + the grain-set version, so
+    /// a continued run matches an un-checkpointed run bit-for-bit.
+    pub grains_version: u64,
+    pub neighbor_cache: Vec<NeighborCacheSer>,
+    pub grain_vis_cache: Vec<GrainVisCacheSer>,
 }
 
-pub const CHECKPOINT_VERSION: u32 = 3;
+pub const CHECKPOINT_VERSION: u32 = 4;
 
 /// Serialize the world column into a `Vec<u8>` via bincode.
 pub fn serialize_world(world: &World) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -315,6 +346,54 @@ pub fn deserialize_world(bytes: &[u8]) -> Result<World, Box<dyn std::error::Erro
 /// serialized into `world_bytes`, nothing is moved).
 pub fn build_checkpoint(sim: &crate::Simulation) -> Result<Checkpoint, Box<dyn std::error::Error>> {
     let world_bytes = serialize_world(&sim.world)?;
+
+    // Audit 3 (Phase 2): encode the transient caches with entity ordinals so
+    // they survive the entity renumbering that column deserialization does.
+    let mut agent_ord: FxHashMap<hecs::Entity, usize> = FxHashMap::default();
+    for (i, (e, _)) in sim.world.query::<(&AgentUid, &Metabolism)>().iter().enumerate() {
+        agent_ord.insert(e, i);
+    }
+    let mut grain_ord: FxHashMap<hecs::Entity, usize> = FxHashMap::default();
+    for (i, (e, _)) in sim.world.query::<&Grain>().iter().enumerate() {
+        grain_ord.insert(e, i);
+    }
+    let neighbor_cache = sim
+        .neighbor_cache
+        .iter()
+        .map(|(e, c)| NeighborCacheSer {
+            agent: agent_ord.get(e).copied().unwrap_or(usize::MAX),
+            neighbors: c
+                .neighbors
+                .iter()
+                .map(|n| agent_ord.get(n).copied().unwrap_or(usize::MAX))
+                .collect(),
+            last_count: c.last_count,
+            last_vel: [c.last_vel.x, c.last_vel.y],
+        })
+        .collect();
+    let grain_vis_cache = sim
+        .grain_vis_cache
+        .iter()
+        .map(|(e, c)| GrainVisCacheSer {
+            agent: agent_ord.get(e).copied().unwrap_or(usize::MAX),
+            pos: [c.pos.x, c.pos.y],
+            heading: c.heading,
+            vision_range: c.vision_range,
+            grains_version: c.grains_version,
+            visible: c
+                .visible
+                .iter()
+                .map(|(ge, p, amt)| {
+                    (
+                        grain_ord.get(ge).copied().unwrap_or(usize::MAX),
+                        [p.x, p.y],
+                        *amt,
+                    )
+                })
+                .collect(),
+        })
+        .collect();
+
     Ok(Checkpoint {
         version: CHECKPOINT_VERSION,
         config: sim.config.clone(),
@@ -335,5 +414,8 @@ pub fn build_checkpoint(sim: &crate::Simulation) -> Result<Checkpoint, Box<dyn s
         total_energy_inflow_spawn_kj: sim.total_energy_inflow_spawn_kj,
         obstacles: sim.obstacles.clone(),
         world_bytes,
+        grains_version: sim.grains_version,
+        neighbor_cache,
+        grain_vis_cache,
     })
 }

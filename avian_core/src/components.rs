@@ -47,6 +47,10 @@ pub enum FSMState {
     /// 2.7 — vitality below SICK_VITALITY_THRESHOLD; moves 50% slower and is
     /// more vulnerable to predators.
     Sick,
+    /// Phase 9 (Audit 3): soaring in a building updraft. MR collapses to
+    /// `GLIDE_MR_MULTIPLIER` and steering agility is restricted (bird rides the
+    /// thermal in a straight-ish line instead of maneuvering).
+    Gliding,
 }
 
 /// 2.6 feather condition 0..=1 (1 = pristine). Decays with rain/mud, restored
@@ -120,6 +124,11 @@ pub struct EnvironmentState {
     pub weather_frames_left: u32,
     /// 4.4: global wind direction (radians); re-rolled when Wind starts.
     pub wind_heading: f64,
+    /// Phase 9 (Audit 3): horizontal direction the sun is coming from (radians),
+    /// derived from `time_of_day_hours`. Drives which side of each Building the
+    /// thermal updraft forms on (sun-facing face). Sunrise (~6h) = east (0),
+    /// noon (12h) = south (-π/2), sunset (18h) = west (π). 0 = +x, π/2 = +y.
+    pub sun_heading: f64,
 }
 
 impl Default for EnvironmentState {
@@ -134,6 +143,7 @@ impl Default for EnvironmentState {
             weather_intensity: 0.0,
             weather_frames_left: crate::calibration::WEATHER_UPDATE_INTERVAL_FRAMES,
             wind_heading: 0.0,
+            sun_heading: -std::f64::consts::FRAC_PI_2, // noon default: sun from the SOUTH (matches -(h-6)/12·π derivation)
         }
     }
 }
@@ -234,4 +244,18 @@ pub struct Obstacle {
     pub kind: ObstacleKind,
     pub min: Vector2<f64>,
     pub max: Vector2<f64>,
+}
+
+/// Phase 9 (Audit 3): an invisible updraft zone on the sun-facing side of a
+/// `ObstacleKind::Building`. A bird that is airborne, inside `min..=max`, and
+/// whose heading aligns with `flow` switches to `FSMState::Gliding`.
+/// Re-derived every tick from `(obstacles, sun_heading)` — never serialized,
+/// never stored, deterministic.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct ThermalZone {
+    pub min: Vector2<f64>,
+    pub max: Vector2<f64>,
+    /// Direction of the updraft/airflow (unit vector, axis-aligned). The bird's
+    /// heading must be within `GLIDE_HEADING_ALIGN_DEG` of this to glide.
+    pub flow: Vector2<f64>,
 }

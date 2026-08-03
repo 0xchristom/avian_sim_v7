@@ -34,6 +34,31 @@ pub const FLIGHT_MR_MULTIPLIER: f64 = 7.0;
 /// fleeing at half flight speed (7.5) still counts as flying.
 pub const FLIGHT_SPEED_THRESHOLD_MS: f64 = 5.0;
 
+/// Phase 9 (Audit 3): depth (m) of the invisible thermal strip that forms on
+/// the sun-facing side of a Building. ~2.5 m keeps the updraft zone just off
+/// the wall so birds ride it without colliding with the building collider.
+pub const THERMAL_DEPTH_M: f64 = 2.5;
+
+/// Phase 9 (Audit 3): metabolic-rate multiplier while `FSMState::Gliding`.
+/// Near-zero — a gliding pigeon exploits the updraft instead of flapping, so
+/// its flight cost collapses from `FLIGHT_MR_MULTIPLIER` (7×) to ~0.15× BMR
+/// (still breathing, still thermoregulating, but no flapping power).
+pub const GLIDE_MR_MULTIPLIER: f64 = 0.15;
+
+/// Phase 9 (Audit 3): cruising speed (m/s) while gliding a thermal. Soaring
+/// is slower than active flapping (15) but well above the walking speed and
+/// above `FLIGHT_SPEED_THRESHOLD_MS`, so the bird is genuinely airborne.
+pub const GLIDE_SPEED_MS: f64 = 8.0;
+
+/// Phase 9 (Audit 3): the bird's heading must be within this angle (degrees) of
+/// the thermal's updraft `flow` vector to enter Gliding.
+pub const GLIDE_HEADING_ALIGN_DEG: f64 = 30.0;
+
+/// Phase 9 (Audit 3): while gliding, boids steering (the "maneuvering" force)
+/// is multiplied by this factor — the bird rides the updraft in a straight-ish
+/// line and cannot bank hard into the flock.
+pub const GLIDE_STEERING_MULTIPLIER: f64 = 0.2;
+
 /// Daily energy requirement (kJ) for a 315 g adult (4.1). Literature: 100-200 kJ.
 pub const DAILY_ENERGY_REQUIREMENT_KJ: f64 = 150.0;
 
@@ -100,6 +125,18 @@ pub fn flight_mr_multiplier(v_mag: f64) -> f64 {
         FLIGHT_MR_MULTIPLIER
     } else {
         1.0
+    }
+}
+
+/// Phase 9 (Audit 3): same as `flight_mr_multiplier` but a Gliding bird pays
+/// `GLIDE_MR_MULTIPLIER` instead of the full flapping cost. Used BOTH by
+/// `metabolism_system` and the inline mirror in `run_systems` so the 7.2
+/// energy-balance accounting stays exact across the two drains.
+pub fn flight_mr_multiplier_state(v_mag: f64, gliding: bool) -> f64 {
+    if gliding {
+        GLIDE_MR_MULTIPLIER
+    } else {
+        flight_mr_multiplier(v_mag)
     }
 }
 
@@ -210,6 +247,26 @@ pub const BOID_SEPARATION_RADIUS_M: f64 = 0.5;
 /// Local flock neighborhood radius (m).
 pub const BOID_NEIGHBOR_RADIUS_M: f64 = 3.0;
 
+/// Audit 3 (Phase 2) — targeted caching thresholds. All frame-based, so
+/// determinism (7.1) is preserved: caches are keyed by hecs entity (generation
+/// aware) and invalidated purely by simulation state deltas, never wall-clock.
+/// Position drift (m) before an agent's cached visible-grain list is stale.
+pub const GRAIN_VIS_CACHE_POS_EPS: f64 = 0.25;
+/// Heading drift (rad, ≈5.7°) before the FOV-cone result is stale.
+pub const GRAIN_VIS_CACHE_ANGLE_EPS: f64 = 0.1;
+/// Vision-range drift (m) before the cache is stale (weather transitions).
+pub const GRAIN_VIS_CACHE_RANGE_EPS: f64 = 0.05;
+/// Neighbor-set refresh period for a stable flock (frames).
+pub const NEIGHBOR_REFRESH_FRAMES: u32 = 4;
+/// A flock counts as "dense" once it has at least this many neighbors
+/// (of the k=7 neighborhood query). High bar: only genuinely dense, coherent
+/// flocks get throttled; sparse foragers refresh every frame.
+pub const NEIGHBOR_STABLE_MIN_COUNT: usize = 6;
+/// Per-frame velocity delta (m/s) below which the flock is "stable".
+pub const NEIGHBOR_STABLE_VEL_EPS: f64 = 0.2;
+/// Every N frames, prune stale phase-2 cache entries for despawned entities.
+pub const CACHE_PRUNE_FRAMES: u32 = 600;
+
 /// Predator speed multiplier over pigeon walk speed (2.2). Kept for the
 /// v1 ground-sprint era; 4.1 recalibrates the predator's absolute speed via
 /// `PREDATOR_SPEED_MS` so it can catch a fleeing (now flying) pigeon.
@@ -315,6 +372,11 @@ pub fn calibration_export_json() -> serde_json::Value {
         "fly_speed_ms": FLY_SPEED_MS,
         "flight_mr_multiplier": FLIGHT_MR_MULTIPLIER,
         "flight_speed_threshold_ms": FLIGHT_SPEED_THRESHOLD_MS,
+        "thermal_depth_m": THERMAL_DEPTH_M,
+        "glide_mr_multiplier": GLIDE_MR_MULTIPLIER,
+        "glide_speed_ms": GLIDE_SPEED_MS,
+        "glide_heading_align_deg": GLIDE_HEADING_ALIGN_DEG,
+        "glide_steering_multiplier": GLIDE_STEERING_MULTIPLIER,
         "daily_energy_requirement_kj": DAILY_ENERGY_REQUIREMENT_KJ,
         "binocular_overlap_degrees": BINOCULAR_OVERLAP_DEGREES,
         "vision_fov_degrees": VISION_FOV_DEGREES,

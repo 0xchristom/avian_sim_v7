@@ -22,7 +22,7 @@ pub fn metabolism_system(
         1.0
     };
 
-    for (_id, (meta, vel, mass)) in world.query::<(&mut Metabolism, &Velocity, &Mass)>().iter() {
+    for (_id, (meta, vel, mass, fsm)) in world.query::<(&mut Metabolism, &Velocity, &Mass, &FSMState)>().iter() {
         let mass_kg = mass.current_g / 1000.0;
         let v_mag = vel.0.norm();
 
@@ -30,11 +30,22 @@ pub fn metabolism_system(
         // FLIGHT_MR_MULTIPLIER (≈7× BMR). The inline mirror in `run_systems`
         // applies the same helper so the energy-balance accounting stays exact.
         // 4.4: heat scales BMR; wind scales the flight MR when airborne.
+        // Phase 9: a Gliding bird's MR collapses to GLIDE_MR_MULTIPLIER
+        // (near-zero) and its cost-of-transport term is ZERO — the updraft
+        // supplies both lift and forward motion, so soaring is near-costless.
         let flying = v_mag >= calibration::FLIGHT_SPEED_THRESHOLD_MS;
         let wind_on_flight = if flying { wind_flight_mult } else { 1.0 };
-        let bmr_kj_s =
-            meta.bmr_watts * calibration::flight_mr_multiplier(v_mag) * heat_mult * wind_on_flight / 1000.0;
-        let cot_kj_s = 0.0125 * mass_kg * v_mag;
+        let gliding = *fsm == FSMState::Gliding;
+        let bmr_kj_s = meta.bmr_watts
+            * calibration::flight_mr_multiplier_state(v_mag, gliding)
+            * heat_mult
+            * wind_on_flight
+            / 1000.0;
+        let cot_kj_s = if gliding {
+            0.0
+        } else {
+            0.0125 * mass_kg * v_mag
+        };
 
         let drain = (bmr_kj_s + cot_kj_s) * dt * drain_factor;
         let actual = drain.min(meta.energy_kj);

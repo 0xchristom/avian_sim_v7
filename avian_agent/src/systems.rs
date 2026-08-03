@@ -1,5 +1,6 @@
 use avian_core::Simulation;
 use avian_core::AgentSnapshot;
+use avian_core::{GrainVisCacheEntry, NeighborCacheEntry};
 use avian_core::components::*;
 use avian_core::calibration;
 use crate::behavior_tree::{build_default_tree, AgentContext};
@@ -68,6 +69,11 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     // Smooth sinusoid: noon (12h) = 1.0, midnight (0h/24h) = 0.1.
     sim.environment.light_level = 0.1
         + 0.9 * (0.5 + 0.5 * (2.0 * std::f64::consts::PI * (h - 12.0) / 24.0).cos());
+    // Phase 9 (Audit 3): sun direction drives which building side hosts the
+    // thermal updraft. Sunrise (6h) = east (0), noon (12h) = south (-π/2),
+    // sunset (18h) = west (π). Deterministic function of time only.
+    sim.environment.sun_heading = -(h - 6.0) / 12.0 * std::f64::consts::PI;
+    sim.update_thermals();
 
     // 4.4: stochastic weather scheduler (config-gated; no-op when disabled).
     crate::weather::update(sim);
@@ -114,11 +120,33 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         }
     }
 
-    let mut grains: Vec<(Entity, Vector2<f64>, u32)> = Vec::new();
+    // Audit 3 (Phase 2): grains get their own spatial index (rebuilt per tick,
+    // capacity retained) so visibility + consumption are O(agents × local
+    // grains) instead of O(agents × grains). `grain_info` maps entity → (pos,
+    // amount); `grain_order` records the world-query order so consumption can
+    // pick grains in the SAME order as the legacy full-scan loop (bit-identical
+    // behavior, deterministic).
+    sim.grain_grid.clear();
+    let mut grain_info: FxHashMap<Entity, (Vector2<f64>, u32)> = FxHashMap::default();
+    let mut grain_order: FxHashMap<Entity, usize> = FxHashMap::default();
+    let mut gi = 0usize;
     for (id, (pos, grain)) in sim.world.query::<(&Position, &Grain)>().iter() {
         if grain.amount > 0 {
-            grains.push((id, pos.0, grain.amount));
+            sim.grain_grid.insert(id, pos.0);
+            grain_info.insert(id, (pos.0, grain.amount));
+            grain_order.insert(id, gi);
+            gi += 1;
         }
+    }
+
+    // Audit 3 (Phase 2): prune stale phase-2 cache entries for despawned
+    // entities every CACHE_PRUNE_FRAMES frames. Bounded and deterministic —
+    // hecs entity ids are generation-aware, so a stale key can never alias a
+    // reused slot, but it would still grow without bound over a long run.
+    if sim.time.frame % calibration::CACHE_PRUNE_FRAMES == 0 {
+        let live: HashSet<Entity> = sim.world.query::<&Metabolism>().iter().map(|(e, _)| e).collect();
+        sim.grain_vis_cache.retain(|k, _| live.contains(k));
+        sim.neighbor_cache.retain(|k, _| live.contains(k));
     }
 
     // 2.2 detection pass: agent → flee direction for any visible predator.
@@ -159,23 +187,36 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     let mut commands: Vec<(Entity, Vector2<f64>)> = Vec::new();
     let mut agent_data_for_rl: Vec<RlExportData> = Vec::new();
     let mut to_despawn: Vec<Entity> = Vec::new();
+    // Audit 3 (Phase 2): with no static obstacles the ONLY fixed colliders are
+    // the four boundary walls. Any interior→interior sight segment lies inside
+    // the convex arena and can never hit them, so LOS raycasts are pure waste —
+    // skip them entirely (bit-identical result, since they can never occlude).
+    let has_obstacles = !sim.obstacles.is_empty();
 
     // 6.1: spatial memory per entity for the viewer's fading memory dots. Built
     // before the 15-component agent query (hecs tuple limit) as a side map.
-    let memory_by_entity: std::collections::HashMap<_, Vec<[f64; 3]>> = sim
-        .world
-        .query::<&MemorySlots>()
-        .iter()
-        .map(|(id, ms)| {
-            (
-                id,
-                ms.slots
-                    .iter()
-                    .map(|s| [s.pos.x, s.pos.y, s.strength])
-                    .collect(),
-            )
-        })
-        .collect();
+    // Audit 3 (Phase 1): hoisted once per frame — this map feeds ONLY the RLHF
+    // export snapshot (`snap.memory`), so when telemetry is disabled it is a
+    // pure per-frame heap allocation with zero purpose and must not exist.
+    let telemetry_on = exporter.is_enabled();
+    let memory_by_entity: std::collections::HashMap<_, Vec<[f64; 3]>> = if telemetry_on {
+        sim.world
+            .query::<&MemorySlots>()
+            .iter()
+            .map(|(id, ms)| {
+                (
+                    id,
+                    ms.slots
+                        .iter()
+                        .map(|s| [s.pos.x, s.pos.y, s.strength])
+                        .collect(),
+                )
+            })
+            .collect()
+    } else {
+        // Empty HashMap allocates nothing; kept so the read site below type-checks.
+        std::collections::HashMap::new()
+    };
 
     for (id, (pos, head, vel, meta, levy, fsm, mass, mobility, vision, head_bob, age, _phys_handle, uid, alarm, feather))
         in sim.world.query_mut::<(&mut Position, &mut Heading, &mut Velocity, &mut Metabolism, &mut LevyState,
@@ -216,9 +257,22 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         let v_mag = vel.0.norm();
         let flying = v_mag >= calibration::FLIGHT_SPEED_THRESHOLD_MS;
         let wind_on_flight = if flying { wind_flight_mult } else { 1.0 };
-        let bmr_kj_s =
-            meta.bmr_watts * calibration::flight_mr_multiplier(v_mag) * heat_mult * wind_on_flight / 1000.0;
-        let cot_kj_s = 12.5 * mass_kg * v_mag / 1000.0;
+        // Phase 9 (Audit 3): a Gliding bird's MR collapses to
+        // GLIDE_MR_MULTIPLIER and its cost-of-transport term is ZERO — the
+        // updraft supplies both lift and forward motion, so soaring is near-
+        // costless. Same helper as metabolism_system keeps the 7.2
+        // energy-balance accounting exact across the two drains.
+        let gliding = *fsm == FSMState::Gliding;
+        let bmr_kj_s = meta.bmr_watts
+            * calibration::flight_mr_multiplier_state(v_mag, gliding)
+            * heat_mult
+            * wind_on_flight
+            / 1000.0;
+        let cot_kj_s = if gliding {
+            0.0
+        } else {
+            12.5 * mass_kg * v_mag / 1000.0
+        };
         let night_factor = if sim.environment.light_level < calibration::NIGHT_REST_LIGHT_THRESHOLD {
             calibration::NIGHT_DRAIN_FACTOR
         } else {
@@ -237,7 +291,43 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
 
         // Fix #6: Query neighbors only from agent positions (grains excluded).
         // 4.4: vision_range shrinks in rain (wet feathers, overcast).
-        let neighbors_raw = sim.spatial_grid.query_k_nearest(pos.0, 7, vision_range, &positions);
+        // Audit 3 (Phase 2): memoize the neighbor SET for dense, stable flocks
+        // (refreshed every NEIGHBOR_REFRESH_FRAMES); unstable or sparse agents
+        // refresh every frame. Distances are always recomputed from fresh
+        // positions, so the steering force stays smooth and the throttle is
+        // deterministic (frame-based, no wall-clock input).
+        let cached_nb = sim.neighbor_cache.get(&id);
+        let stable = cached_nb.map_or(false, |c| {
+            c.last_count >= calibration::NEIGHBOR_STABLE_MIN_COUNT
+                && (vel.0 - c.last_vel).norm() <= calibration::NEIGHBOR_STABLE_VEL_EPS
+        });
+        let refresh_period: u32 = if stable {
+            calibration::NEIGHBOR_REFRESH_FRAMES
+        } else {
+            1
+        };
+        let neighbors_raw: Vec<(Entity, f64)> = if sim.time.frame % refresh_period == 0 {
+            let raw = sim.spatial_grid.query_k_nearest(pos.0, 7, vision_range, &positions);
+            sim.neighbor_cache.insert(
+                id,
+                NeighborCacheEntry {
+                    neighbors: raw.iter().map(|(e, _)| *e).collect(),
+                    last_count: raw.len(),
+                    last_vel: vel.0,
+                },
+            );
+            raw
+        } else {
+            sim.neighbor_cache
+                .get(&id)
+                .map(|c| {
+                    c.neighbors
+                        .iter()
+                        .filter_map(|e| positions.get(e).map(|p| (*e, (p - pos.0).norm())))
+                        .collect()
+                })
+                .unwrap_or_else(|| sim.spatial_grid.query_k_nearest(pos.0, 7, vision_range, &positions))
+        };
         let targets: Vec<(Entity, Vector2<f64>)> = neighbors_raw.iter().filter_map(|(e, _)| {
             positions.get(e).map(|p| (*e, *p))
         }).collect();
@@ -246,45 +336,108 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         // (borrowed by query_mut above), so raycasting here is sound.
         let physics = &sim.physics;
         let occluded = |target: &Vector2<f64>, _dist: f64| -> bool {
+            if !has_obstacles {
+                return false;
+            }
             physics
                 .cast_ray_to_static(pos.0, *target - pos.0, 1.0)
                 .map_or(false, |toi| toi < 1.0 - calibration::LOS_BLOCK_EPS)
         };
         let visible_neighbors = cone_cast(pos.0, head.0, vision.fov_degrees, vision_range, &targets, &occluded);
         let visible_neighbor_entities: Vec<Entity> = visible_neighbors.iter().map(|(e, _, _)| *e).collect();
-        let visible_neighbor_pos: Vec<[f64; 2]> = visible_neighbors.iter().map(|(_, p, _)| [p.x, p.y]).collect();
+        // Audit 3 (Phase 1): the per-agent RLHF export vectors are collected
+        // only when telemetry is on — they feed `RlExportData` (obs_v1 neighbor
+        // context), never the behavior tree. `Vec::new()` allocates nothing.
+        let visible_neighbor_pos: Vec<[f64; 2]> = if telemetry_on {
+            visible_neighbors.iter().map(|(_, p, _)| [p.x, p.y]).collect()
+        } else {
+            Vec::new()
+        };
 
-        let visible_grains: Vec<(Entity, Vector2<f64>, u32)> = grains.iter().filter(|(_, g_pos, _)| {
-            let dir = *g_pos - pos.0;
-            let dist = dir.norm();
-            if dist > vision_range || dist < 1e-6 { return false; }
-            let angle = dir.y.atan2(dir.x) - head.0;
-            let norm_ang = crate::perception::normalize_angle_relative(angle);
-            if norm_ang.abs() > vision.fov_degrees.to_radians() / 2.0 { return false; }
-            // 4.3: hide grain behind a wall/building even inside the FOV cone.
-            if physics
-                .cast_ray_to_static(pos.0, *g_pos - pos.0, 1.0)
-                .map_or(false, |toi| toi < 1.0 - calibration::LOS_BLOCK_EPS)
-            {
-                return false;
-            }
-            true
-        }).cloned().collect();
-        let visible_grain_pos: Vec<[f64; 2]> = visible_grains.iter().map(|(_, p, _)| [p.x, p.y]).collect();
+        // Audit 3 (Phase 2): cached visible-grain list. Reuse the previous
+        // tick's list while the agent hasn't moved/rotated beyond tolerance and
+        // the grain set is unchanged; otherwise recompute from the grain
+        // spatial index (cone + LOS raycast only over local candidates).
+        let cache_fresh = sim.grain_vis_cache.get(&id).map_or(false, |c| {
+            (c.pos - pos.0).norm() <= calibration::GRAIN_VIS_CACHE_POS_EPS
+                && (c.heading - head.0)
+                    .abs()
+                    .min(std::f64::consts::TAU - (c.heading - head.0).abs())
+                    <= calibration::GRAIN_VIS_CACHE_ANGLE_EPS
+                && (c.vision_range - vision_range).abs() <= calibration::GRAIN_VIS_CACHE_RANGE_EPS
+                && c.grains_version == sim.grains_version
+        });
+        let cached_visible = if cache_fresh {
+            sim.grain_vis_cache.get(&id).map(|c| &c.visible)
+        } else {
+            None
+        };
+        let visible_grains: Vec<(Entity, Vector2<f64>, u32)> = if let Some(v) = cached_visible {
+            v.clone()
+        } else {
+            let candidates = sim.grain_grid.query_radius(pos.0, vision_range);
+            let visible: Vec<(Entity, Vector2<f64>, u32)> = candidates
+                .iter()
+                .filter_map(|e| {
+                    let (g_pos, g_amt) = *grain_info.get(e)?;
+                    let dir = g_pos - pos.0;
+                    let dist = dir.norm();
+                    if dist > vision_range || dist < 1e-6 {
+                        return None;
+                    }
+                    let angle = dir.y.atan2(dir.x) - head.0;
+                    let norm_ang = crate::perception::normalize_angle_relative(angle);
+                    if norm_ang.abs() > vision.fov_degrees.to_radians() / 2.0 {
+                        return None;
+                    }
+                    // 4.3: hide grain behind a wall/building even inside the FOV cone.
+                    if has_obstacles
+                        && physics
+                            .cast_ray_to_static(pos.0, g_pos - pos.0, 1.0)
+                            .map_or(false, |toi| toi < 1.0 - calibration::LOS_BLOCK_EPS)
+                    {
+                        return None;
+                    }
+                    Some((*e, g_pos, g_amt))
+                })
+                .collect();
+            sim.grain_vis_cache.insert(
+                id,
+                GrainVisCacheEntry {
+                    pos: pos.0,
+                    heading: head.0,
+                    vision_range,
+                    grains_version: sim.grains_version,
+                    visible: visible.clone(),
+                },
+            );
+            visible
+        };
+        let visible_grain_pos: Vec<[f64; 2]> = if telemetry_on {
+            visible_grains.iter().map(|(_, p, _)| [p.x, p.y]).collect()
+        } else {
+            Vec::new()
+        };
 
         let fleeing = threats.contains_key(&id);
         let flee_dir = threats.get(&id).copied().unwrap_or(Vector2::zeros());
         alarm.0 = fleeing;
         let sick = age.vitality < calibration::SICK_VITALITY_THRESHOLD;
         // 3.2 flocking reward input: agents within the 2 m shaping radius.
-        let flock_count = neighbors_raw.iter()
-            .filter(|(_, d)| *d <= calibration::REWARD_FLOCK_NEIGHBOR_DIST_M)
-            .count();
+        // Audit 3 (Phase 1): only consumed by the RLHF reward — skip the scan
+        // entirely when telemetry is off.
+        let flock_count = if telemetry_on {
+            neighbors_raw.iter()
+                .filter(|(_, d)| *d <= calibration::REWARD_FLOCK_NEIGHBOR_DIST_M)
+                .count()
+        } else {
+            0
+        };
 
         let mut ctx = AgentContext {
             pos, head, vel, meta, fsm, levy, mass, mobility, vision, head_bob,
             neighbors: visible_neighbor_entities.clone(),
-            grains: visible_grains.clone(),
+            grains: visible_grains,
             rng: &mut sim.rng,
             dt,
             light_level: sim.environment.light_level,
@@ -296,6 +449,8 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
             // 5.2: scenario-tunable hunger threshold for the root Forage
             // condition (defaults to the biology constant).
             forage_hunger_threshold: sim.config.foraging_threshold,
+            // Phase 9 (Audit 3): building-thermal updraft zones for Gliding.
+            thermals: &sim.thermals,
         };
 
         let _ = tree.tick(&mut ctx);
@@ -316,6 +471,14 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
                 .collect();
             let weights = flocking::weights_for_state(*ctx.fsm, &flocking::default_weights());
             let steer = flocking::steering(ctx.pos.0, &boid_neighbors, &weights);
+            // Phase 9 (Audit 3): gliding restricts steering agility — the bird
+            // rides the updraft in a straight-ish line and cannot bank into the
+            // flock, so the boids maneuvering force is scaled way down.
+            let steer = if *ctx.fsm == FSMState::Gliding {
+                steer * calibration::GLIDE_STEERING_MULTIPLIER
+            } else {
+                steer
+            };
             ctx.vel.0 += steer;
         }
 
@@ -338,24 +501,27 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
 
         commands.push((id, ctx.vel.0));
 
-        let snap = AgentSnapshot {
-            uid: uid.0.clone(),
-            pos: [ctx.pos.0.x, ctx.pos.0.y], heading: ctx.head.0, vel: [ctx.vel.0.x, ctx.vel.0.y],
-            mass_g: ctx.mass.current_g, age_years: age.years, energy_kj: ctx.meta.energy_kj, hunger: ctx.meta.hunger,
-            fsm_state: format!("{:?}", ctx.fsm), head_offset: [ctx.head_bob.offset.x, ctx.head_bob.offset.y],
-            alarm_triggered: alarm.0,
-            sick,
-            vitality: age.vitality,
-            // 6.1: viewer memory dots — [x, y, strength] of remembered food.
-            memory: memory_by_entity.get(&id).cloned().unwrap_or_default(),
-        };
-        // 6.2: telemetry is opt-in; when the exporter is disabled (no `--output`
-        // server flag) skip collecting RL export data entirely.
-        if exporter.is_enabled() {
+        // Audit 3 (Phase 1): the AgentSnapshot is telemetry-only (the viewer
+        // reads `Simulation::snapshot()`, built independently in avian_core).
+        // Building it here — including the per-agent `memory` Vec clone — would
+        // be a heap allocation per agent per frame when telemetry is off, so it
+        // is constructed strictly inside the gated block.
+        if telemetry_on {
+            let snap = AgentSnapshot {
+                uid: uid.0.clone(),
+                pos: [ctx.pos.0.x, ctx.pos.0.y], heading: ctx.head.0, vel: [ctx.vel.0.x, ctx.vel.0.y],
+                mass_g: ctx.mass.current_g, age_years: age.years, energy_kj: ctx.meta.energy_kj, hunger: ctx.meta.hunger,
+                fsm_state: format!("{:?}", ctx.fsm), head_offset: [ctx.head_bob.offset.x, ctx.head_bob.offset.y],
+                alarm_triggered: alarm.0,
+                sick,
+                vitality: age.vitality,
+                // 6.1: viewer memory dots — [x, y, strength] of remembered food.
+                memory: memory_by_entity.get(&id).cloned().unwrap_or_default(),
+            };
             agent_data_for_rl.push(RlExportData {
                 snap,
-                neighbor_pos: visible_neighbor_pos.clone(),
-                grain_pos: visible_grain_pos.clone(),
+                neighbor_pos: visible_neighbor_pos,
+                grain_pos: visible_grain_pos,
                 flock_count,
             });
         }
@@ -422,11 +588,22 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         }
 
         if *fsm == FSMState::Foraging {
-            for (g_id, g_pos, _) in &grains {
-                let dist = (g_pos - pos.0).norm();
-                if dist < 0.5 && !consumed_set.contains(g_id) {
-                    grains_to_consume.push(*g_id);
-                    consumed_set.insert(*g_id);
+            // Audit 3 (Phase 2): query only local grains via the grain spatial
+            // index instead of scanning the whole set, then sort candidates by
+            // world-query order so the picked grain matches the legacy full-scan
+            // loop exactly (bit-identical trajectories, deterministic).
+            let mut candidates: Vec<Entity> = sim.grain_grid.query_radius(pos.0, 0.5);
+            candidates.sort_by_key(|e| grain_order.get(e).copied().unwrap_or(usize::MAX));
+            for g_id in candidates {
+                if consumed_set.contains(&g_id) {
+                    continue;
+                }
+                if let Some((g_pos, _)) = grain_info.get(&g_id) {
+                    if (g_pos - pos.0).norm() >= 0.5 {
+                        continue;
+                    }
+                    grains_to_consume.push(g_id);
+                    consumed_set.insert(g_id);
                     meta.crop_count = (meta.crop_count + 1).min(meta.crop_max);
                     meta.energy_kj += calibration::GRAIN_ENERGY_KJ;
                     sim.total_energy_intake_kj += calibration::GRAIN_ENERGY_KJ;
@@ -525,21 +702,26 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     }
     for g_id in to_despawn_grains {
         sim.world.despawn(g_id).ok();
+        // Audit 3 (Phase 2): the grain set changed → visible-grain caches must
+        // recompute next tick.
+        sim.grains_version = sim.grains_version.wrapping_add(1);
     }
 
     // RLHF export: obs_v1 observation + 3.2 event-driven reward (sparse +
     // shaped, per-second terms already scaled by dt). Skipped entirely when
     // telemetry is disabled (6.2: no `--output` server flag → no obs/reward
-    // work at all).
+    // work at all). Audit 3 (Phase 1): the fast-path early return sits BEFORE
+    // the `predator_positions` Vec, so the O(predators) per-frame heap
+    // allocation only exists on the telemetry-enabled path.
+    if !telemetry_on {
+        return;
+    }
     let predator_positions: Vec<[f64; 2]> = sim
         .world
         .query::<(&Position, &Predator)>()
         .iter()
         .map(|(_, (p, _))| [p.0.x, p.0.y])
         .collect();
-    if !exporter.is_enabled() {
-        return;
-    }
     let time_us = sim.time.time_us;
     let frame = sim.time.frame;
     let light_level = sim.environment.light_level;

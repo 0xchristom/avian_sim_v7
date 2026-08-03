@@ -14,6 +14,7 @@ use components::*;
 use events::Event;
 use avian_physics::PhysicsWorld;
 use nalgebra::Vector2;
+use rustc_hash::FxHashMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -188,6 +189,30 @@ pub struct SimulationSnapshot {
     pub dead_count: u32,
 }
 
+/// Audit 3 (Phase 2) — cached visible-grain list for one agent. Stored on
+/// `Simulation` (not a component) so it is readable inside the 15-component
+/// agent query, and invalidated lazily by position/heading/range/version drift
+/// (`GRAIN_VIS_CACHE_*_EPS`). Recomputed from the grain spatial index only when
+/// stale, so O(agents × grains) visibility becomes O(agents × local grains)
+/// amortized.
+pub struct GrainVisCacheEntry {
+    pub pos: Vector2<f64>,
+    pub heading: f64,
+    pub vision_range: f64,
+    pub grains_version: u64,
+    pub visible: Vec<(hecs::Entity, Vector2<f64>, u32)>,
+}
+
+/// Audit 3 (Phase 2) — cached neighbor SET for one agent (neighbor-query
+/// memoization). Neighbor positions/velocities are always read fresh; only the
+/// member set is throttled, refreshed every `NEIGHBOR_REFRESH_FRAMES` for dense,
+/// stable flocks and every frame otherwise.
+pub struct NeighborCacheEntry {
+    pub neighbors: Vec<hecs::Entity>,
+    pub last_count: usize,
+    pub last_vel: Vector2<f64>,
+}
+
 pub struct Simulation {
     pub world: World,
     pub rng: rng::SimRng,
@@ -219,6 +244,22 @@ pub struct Simulation {
     pub total_energy_lost_at_death_kj: f64,
     /// 7.2: energy carried in by immigration respawns (inflow, not intake).
     pub total_energy_inflow_spawn_kj: f64,
+    // Audit 3 (Phase 2) — targeted caching for the 500-agent wall.
+    /// Spatial index of live grains (rebuilt each tick: cleared + re-inserted
+    /// so bucket capacity is retained). The agent grid is `spatial_grid`.
+    pub grain_grid: spatial::SpatialHashGrid,
+    /// Per-agent cached visible-grain lists (dirty-flag invalidated).
+    pub grain_vis_cache: FxHashMap<hecs::Entity, GrainVisCacheEntry>,
+    /// Per-agent cached neighbor sets (throttled query memoization).
+    pub neighbor_cache: FxHashMap<hecs::Entity, NeighborCacheEntry>,
+    /// Monotonic counter bumped when a grain spawns or despawns — the dirty
+    /// signal for `grain_vis_cache` so consumed/expired grains invalidate it.
+    pub grains_version: u64,
+    // Phase 9 (Audit 3) — emergent aerodynamics.
+    /// Invisible updraft zones on the sun-facing sides of Buildings, re-derived
+    /// every tick from `(obstacles, environment.sun_heading)`. Plain derived
+    /// data (never serialized) — restored checkpoints recompute it identically.
+    pub thermals: Vec<ThermalZone>,
 }
 
 impl Simulation {
@@ -252,6 +293,11 @@ impl Simulation {
             total_energy_expenditure_kj: 0.0,
             total_energy_lost_at_death_kj: 0.0,
             total_energy_inflow_spawn_kj: 0.0,
+            grain_grid: spatial::SpatialHashGrid::new(2.0),
+            grain_vis_cache: FxHashMap::default(),
+            neighbor_cache: FxHashMap::default(),
+            grains_version: 0,
+            thermals: Vec::new(),
         };
         // 5.2: an explicit scenario layout beats the built-in default map.
         let custom_specs = sim.config.obstacles.clone();
@@ -295,6 +341,71 @@ impl Simulation {
         self.add_obstacle(ObstacleKind::Tree, Vector2::new(13.0, 16.0), Vector2::new(14.5, 18.0));
         self.add_obstacle(ObstacleKind::Tree, Vector2::new(25.0, 14.0), Vector2::new(26.5, 15.5));
         self.add_obstacle(ObstacleKind::Water, Vector2::new(7.0, 12.0), Vector2::new(11.0, 13.5));
+    }
+
+    /// Phase 9 (Audit 3): re-derive the invisible building-thermal updraft
+    /// zones from `(obstacles, environment.sun_heading)`. Only
+    /// `ObstacleKind::Building` produces thermals; the sun-facing side is the
+    /// edge whose outward normal most aligns with the sun direction. The zone
+    /// is a `THERMAL_DEPTH_M` strip just outside that edge; `flow` is the
+    /// axis-aligned updraft/airflow along the face (vertical faces rise +y,
+    /// horizontal faces run +x). Deterministic: obstacles + sun are both plain
+    /// data, so restored checkpoints recompute identical zones.
+    pub fn update_thermals(&mut self) {
+        self.thermals.clear();
+        let sun_heading = self.environment.sun_heading;
+        let sun_dir = Vector2::new(sun_heading.cos(), sun_heading.sin());
+        let d = calibration::THERMAL_DEPTH_M;
+        for o in &self.obstacles {
+            if o.kind != ObstacleKind::Building {
+                continue;
+            }
+            // (normal, strip rect, flow) for each face. Sun-facing = max
+            // dot(outward normal, sun direction).
+            let candidates = [
+                // East face (right edge), flow rises +y along the wall.
+                (
+                    Vector2::new(1.0, 0.0),
+                    Vector2::new(o.max.x, o.min.y),
+                    Vector2::new(o.max.x + d, o.max.y),
+                    Vector2::new(0.0, 1.0),
+                ),
+                // North face (top edge), flow runs +x along the wall.
+                (
+                    Vector2::new(0.0, 1.0),
+                    Vector2::new(o.min.x, o.max.y),
+                    Vector2::new(o.max.x, o.max.y + d),
+                    Vector2::new(1.0, 0.0),
+                ),
+                // West face (left edge), flow rises -y along the wall.
+                (
+                    Vector2::new(-1.0, 0.0),
+                    Vector2::new(o.min.x - d, o.min.y),
+                    Vector2::new(o.min.x, o.max.y),
+                    Vector2::new(0.0, -1.0),
+                ),
+                // South face (bottom edge), flow runs -x along the wall.
+                (
+                    Vector2::new(0.0, -1.0),
+                    Vector2::new(o.min.x, o.min.y - d),
+                    Vector2::new(o.max.x, o.min.y),
+                    Vector2::new(-1.0, 0.0),
+                ),
+            ];
+            let (_, min, max, flow) = candidates
+                .iter()
+                .max_by(|a, b| {
+                    let da = a.0.dot(&sun_dir);
+                    let db = b.0.dot(&sun_dir);
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap();
+            self.thermals.push(ThermalZone {
+                min: *min,
+                max: *max,
+                flow: *flow,
+            });
+        }
     }
 
     /// 4.3: true if `p` lies strictly inside any obstacle's bounding box.
@@ -360,6 +471,10 @@ impl Simulation {
 
     /// Spawn a grain entity (2.5 + existing spawn path).
     pub fn spawn_grain_entity(&mut self, pos: Vector2<f64>, amount: u32) -> hecs::Entity {
+        // Audit 3 (Phase 2): bump the set version so per-agent visible-grain
+        // caches are invalidated (this covers direct spawns AND SpawnGrain
+        // events, which route through here).
+        self.grains_version = self.grains_version.wrapping_add(1);
         self.world.spawn((Position(pos), Grain { amount }))
     }
 
@@ -595,9 +710,65 @@ impl Simulation {
             // checkpoint. The matching fixed colliders already live inside the
             // restored `physics` state, so nothing is re-added here.
             obstacles: ckpt.obstacles,
+            // Audit 3 (Phase 2): transient caches are restored below (bit-exact
+            // continuation); these placeholders are overwritten by the remap.
+            grain_grid: spatial::SpatialHashGrid::new(2.0),
+            grain_vis_cache: FxHashMap::default(),
+            neighbor_cache: FxHashMap::default(),
+            grains_version: ckpt.grains_version,
+            thermals: Vec::new(),
         };
         // Rebuild the spatial grid so it matches world positions immediately.
         sim.rebuild_spatial_grid();
+
+        // Audit 3 (Phase 2): remap the serialized phase-2 caches through the
+        // world-query ordinals (preserved 1:1 by the column round-trip).
+        let mut agent_by_ord: FxHashMap<usize, hecs::Entity> = FxHashMap::default();
+        for (i, (e, _)) in sim.world.query::<(&AgentUid, &Metabolism)>().iter().enumerate() {
+            agent_by_ord.insert(i, e);
+        }
+        let mut grain_by_ord: FxHashMap<usize, hecs::Entity> = FxHashMap::default();
+        for (i, (e, _)) in sim.world.query::<&Grain>().iter().enumerate() {
+            grain_by_ord.insert(i, e);
+        }
+        for nc in &ckpt.neighbor_cache {
+            if let Some(e) = agent_by_ord.get(&nc.agent) {
+                sim.neighbor_cache.insert(
+                    *e,
+                    NeighborCacheEntry {
+                        neighbors: nc
+                            .neighbors
+                            .iter()
+                            .filter_map(|o| agent_by_ord.get(o).copied())
+                            .collect(),
+                        last_count: nc.last_count,
+                        last_vel: Vector2::new(nc.last_vel[0], nc.last_vel[1]),
+                    },
+                );
+            }
+        }
+        for gc in &ckpt.grain_vis_cache {
+            if let Some(e) = agent_by_ord.get(&gc.agent) {
+                sim.grain_vis_cache.insert(
+                    *e,
+                    GrainVisCacheEntry {
+                        pos: Vector2::new(gc.pos[0], gc.pos[1]),
+                        heading: gc.heading,
+                        vision_range: gc.vision_range,
+                        grains_version: gc.grains_version,
+                        visible: gc
+                            .visible
+                            .iter()
+                            .filter_map(|(o, p, amt)| {
+                                grain_by_ord
+                                    .get(o)
+                                    .map(|ge| (*ge, Vector2::new(p[0], p[1]), *amt))
+                            })
+                            .collect(),
+                    },
+                );
+            }
+        }
         Ok(sim)
     }
 
