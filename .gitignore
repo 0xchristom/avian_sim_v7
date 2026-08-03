@@ -28,5 +28,9 @@ DEVELOPMENT_PLAN.md
 # dataset
 dataset.csv
 
+# Background images
+viewer/public/assets/background-no-fireflies.jpg
+viewer/dist/assets/background-no-fireflies.jpg
+
 # Internal review audits (not for public distribution)
 audits/
