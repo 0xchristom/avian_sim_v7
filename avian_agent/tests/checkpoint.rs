@@ -250,3 +250,95 @@ fn test_checkpoint_registers_every_spawned_component() {
         after.len()
     );
 }
+
+/// Sprint 5 (B16): a corrupt or truncated checkpoint file must surface as an
+/// explicit error, not a panic or a silently-wrong simulation. bincode
+/// deserialization of a truncated byte stream fails at the type boundary, so
+/// `load_checkpoint` must propagate that as an `Err` and never return a
+/// simulation with a partial world.
+#[test]
+fn test_checkpoint_truncated_file_errors() {
+    let mut sim = setup_sim();
+    let mut exporter = TelemetryExporter::new(usize::MAX);
+    for _ in 0..200 {
+        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+    }
+
+    let path = std::env::temp_dir().join("avian_ckpt_trunc.bin");
+    let p = path.to_str().unwrap().to_string();
+    sim.save_checkpoint(&p).expect("save checkpoint");
+
+    // Truncate the file to 40% of its length — mid-world, mid-payload.
+    let bytes = std::fs::read(&p).expect("read checkpoint");
+    let cut = (bytes.len() * 2) / 5;
+    std::fs::write(&p, &bytes[..cut]).expect("truncate checkpoint");
+
+    let result = Simulation::load_checkpoint(&p);
+    assert!(
+        result.is_err(),
+        "truncated checkpoint must load as an error, got Ok"
+    );
+
+    // Flip random bytes — a corrupted-but-full-length payload must also error.
+    std::fs::write(&p, &bytes).expect("restore checkpoint");
+    let mut corrupt = bytes;
+    let len = corrupt.len();
+    for i in 0..32 {
+        corrupt[len / 2 + i] = 0xFF;
+    }
+    std::fs::write(&p, &corrupt).expect("corrupt checkpoint");
+
+    let result2 = Simulation::load_checkpoint(&p);
+    assert!(
+        result2.is_err(),
+        "corrupted checkpoint must load as an error, got Ok"
+    );
+
+    let _ = std::fs::remove_file(&p);
+}
+
+/// Sprint 5 (B16): the atomic write path must never destroy the last valid
+/// checkpoint. `save_checkpoint` serializes to a `.tmp` sibling and renames it
+/// over the target, so a failed write leaves the previous file untouched. We
+/// simulate the failure by pre-creating the `.tmp` file as a directory (rename
+/// onto a non-empty directory fails on most platforms) — the pre-existing
+/// checkpoint at `path` must still load.
+#[test]
+fn test_checkpoint_interrupted_write_keeps_last_valid() {
+    let mut sim = setup_sim();
+    let mut exporter = TelemetryExporter::new(usize::MAX);
+    for _ in 0..200 {
+        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+    }
+
+    let path = std::env::temp_dir().join("avian_ckpt_atomic.bin");
+    let p = path.to_str().unwrap().to_string();
+    sim.save_checkpoint(&p).expect("save checkpoint");
+    let before = fingerprint(&sim);
+
+    // Sabotage the atomic write: make the `.tmp` target un-renamable. A
+    // non-empty directory at the tmp path makes `rename` fail.
+    let tmp = format!("{p}.tmp");
+    std::fs::remove_file(&tmp).ok();
+    std::fs::create_dir_all(&tmp).expect("create tmp dir");
+    std::fs::write(format!("{tmp}\\blocker"), b"x").expect("blocker");
+
+    let result = sim.save_checkpoint(&p);
+    assert!(
+        result.is_err(),
+        "a blocked atomic write should report an error"
+    );
+
+    // The previous checkpoint must still be loadable and identical.
+    let restored = Simulation::load_checkpoint(&p).expect("previous checkpoint survives");
+    assert_eq!(
+        fingerprint(&restored),
+        before,
+        "failed atomic write corrupted the previous checkpoint"
+    );
+
+    // Cleanup: remove the sabotaged tmp dir + the checkpoint.
+    std::fs::remove_file(format!("{tmp}\\blocker")).ok();
+    std::fs::remove_dir_all(&tmp).ok();
+    let _ = std::fs::remove_file(&p);
+}

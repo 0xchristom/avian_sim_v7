@@ -1,11 +1,24 @@
-use avian_core::AgentSnapshot;
 use avian_core::calibration;
+use avian_core::AgentSnapshot;
 
-pub struct RLObservation { pub vector: [f32; 128] }
+pub struct RLObservation {
+    pub vector: [f32; 128],
+}
 
-pub struct RLAction { pub discrete: Option<DiscreteAction>, pub continuous: Option<(f32, f32)> }
+pub struct RLAction {
+    pub discrete: Option<DiscreteAction>,
+    pub continuous: Option<(f32, f32)>,
+}
 
-pub enum DiscreteAction { Idle, Walk, Run, Peck, ScanLeft, ScanRight, Flee }
+pub enum DiscreteAction {
+    Idle,
+    Walk,
+    Run,
+    Peck,
+    ScanLeft,
+    ScanRight,
+    Flee,
+}
 
 /// 3.2 event-driven reward with a per-component breakdown for telemetry
 /// debugging. Per-second rates (flocking, starvation) are pre-multiplied by
@@ -35,25 +48,41 @@ impl RLReward {
         grain_eaten: bool,
         captured: bool,
     ) -> Self {
-        let grain = if grain_eaten { calibration::REWARD_GRAIN as f32 } else { 0.0 };
+        let grain = if grain_eaten {
+            calibration::REWARD_GRAIN as f32
+        } else {
+            0.0
+        };
         let flocking = if flock_neighbors >= calibration::REWARD_FLOCK_NEIGHBORS_MIN {
             calibration::REWARD_FLOCKING_PER_S as f32 * dt
         } else {
             0.0
         };
-        let starvation = if energy_kj < calibration::REWARD_STARVATION_ENERGY_FRACTION as f32 * max_energy {
-            -calibration::REWARD_STARVATION_PER_S as f32 * dt
+        let starvation =
+            if energy_kj < calibration::REWARD_STARVATION_ENERGY_FRACTION as f32 * max_energy {
+                -calibration::REWARD_STARVATION_PER_S as f32 * dt
+            } else {
+                0.0
+            };
+        let captured = if captured {
+            calibration::REWARD_CAPTURED as f32
         } else {
             0.0
         };
-        let captured = if captured { calibration::REWARD_CAPTURED as f32 } else { 0.0 };
         let flee_success = if was_alarmed && !alarm_triggered && captured == 0.0 {
             calibration::REWARD_FLEE_SUCCESS as f32
         } else {
             0.0
         };
         let total = grain + flocking + starvation + captured + flee_success;
-        Self { grain, flocking, starvation, captured, flee_success, total }
+        Self {
+            grain,
+            flocking,
+            starvation,
+            captured,
+            flee_success,
+            total,
+        }
     }
 }
 
@@ -104,7 +133,11 @@ pub fn state_to_observation(
         let db = ((b[0] - agent.pos[0]).powi(2) + (b[1] - agent.pos[1]).powi(2)).sqrt();
         da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
     });
-    for (i, g) in grains_sorted.iter().take(calibration::OBS_GRAIN_COUNT).enumerate() {
+    for (i, g) in grains_sorted
+        .iter()
+        .take(calibration::OBS_GRAIN_COUNT)
+        .enumerate()
+    {
         let base = 10 + i * 2;
         vec[base] = (g[0] - agent.pos[0]) as f32;
         vec[base + 1] = (g[1] - agent.pos[1]) as f32;
@@ -117,11 +150,16 @@ pub fn state_to_observation(
         let db = ((b[0] - agent.pos[0]).powi(2) + (b[1] - agent.pos[1]).powi(2)).sqrt();
         da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
     });
-    for (i, n) in neigh_sorted.iter().take(calibration::OBS_NEIGHBOR_COUNT).enumerate() {
+    for (i, n) in neigh_sorted
+        .iter()
+        .take(calibration::OBS_NEIGHBOR_COUNT)
+        .enumerate()
+    {
         let base = 16 + i * 3;
         vec[base] = (n[0] - agent.pos[0]) as f32;
         vec[base + 1] = (n[1] - agent.pos[1]) as f32;
-        vec[base + 2] = ((n[0] - agent.pos[0]).powi(2) + (n[1] - agent.pos[1]).powi(2)).sqrt() as f32;
+        vec[base + 2] =
+            ((n[0] - agent.pos[0]).powi(2) + (n[1] - agent.pos[1]).powi(2)).sqrt() as f32;
     }
 
     // Predator block: nearest predator rel pos + threat magnitude + alarm flag.
@@ -217,16 +255,44 @@ mod tests {
         let predators = [[10.0, 10.5]];
         let obs = state_to_observation(&agent, &neighbors, &grains, &predators, 1.0);
         // Closest grain (12.0) first: rel pos = [-4, 0].
-        assert!((obs.vector[10] + 4.0).abs() < 1e-6, "grain[0].x={}", obs.vector[10]);
-        assert!((obs.vector[11]).abs() < 1e-6, "grain[0].y={}", obs.vector[11]);
+        assert!(
+            (obs.vector[10] + 4.0).abs() < 1e-6,
+            "grain[0].x={}",
+            obs.vector[10]
+        );
+        assert!(
+            (obs.vector[11]).abs() < 1e-6,
+            "grain[0].y={}",
+            obs.vector[11]
+        );
         // Second closest grain (21.0): rel pos = [5, 0].
-        assert!((obs.vector[12] - 5.0).abs() < 1e-6, "grain[1].x={}", obs.vector[12]);
+        assert!(
+            (obs.vector[12] - 5.0).abs() < 1e-6,
+            "grain[1].x={}",
+            obs.vector[12]
+        );
         // Closest neighbor (17.0) first: rel pos = [1, 0], dist 1.
-        assert!((obs.vector[16] - 1.0).abs() < 1e-6, "neighbor[0].x={}", obs.vector[16]);
-        assert!((obs.vector[18] - 1.0).abs() < 1e-6, "neighbor[0].dist={}", obs.vector[18]);
+        assert!(
+            (obs.vector[16] - 1.0).abs() < 1e-6,
+            "neighbor[0].x={}",
+            obs.vector[16]
+        );
+        assert!(
+            (obs.vector[18] - 1.0).abs() < 1e-6,
+            "neighbor[0].dist={}",
+            obs.vector[18]
+        );
         // Predator rel pos = [-6, 0], threat = 1/(1+6).
-        assert!((obs.vector[37] + 6.0).abs() < 1e-6, "pred.x={}", obs.vector[37]);
-        assert!((obs.vector[39] - 1.0 / 7.0).abs() < 1e-6, "threat={}", obs.vector[39]);
+        assert!(
+            (obs.vector[37] + 6.0).abs() < 1e-6,
+            "pred.x={}",
+            obs.vector[37]
+        );
+        assert!(
+            (obs.vector[39] - 1.0 / 7.0).abs() < 1e-6,
+            "threat={}",
+            obs.vector[39]
+        );
     }
 
     #[test]
@@ -248,7 +314,11 @@ mod tests {
 
         // Starvation pressure (energy < 20% of 60 = 12).
         let r = RLReward::compute(dt, 5.0, 60.0, 0, false, false, false, false);
-        assert!((r.starvation + 0.01 * dt).abs() < 1e-12, "starvation={}", r.starvation);
+        assert!(
+            (r.starvation + 0.01 * dt).abs() < 1e-12,
+            "starvation={}",
+            r.starvation
+        );
 
         // Capture dominates.
         let r = RLReward::compute(dt, 5.0, 60.0, 0, true, false, false, true);

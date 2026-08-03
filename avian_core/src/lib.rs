@@ -372,7 +372,10 @@ pub struct Simulation {
     /// 6.2: age in years at death, one entry per despawned agent — fed to the
     /// survival-curve histogram in the metrics dashboard.
     pub death_ages: Vec<f64>,
-    pub events_log: Vec<(u32, Event)>,
+    /// 2.5: event journal — `(frame, event, application result)`. Sprint 5:
+    /// records whether each event actually applied (no-ops are NOT success) and
+    /// is bounded to `MAX_EVENTS_LOG` entries (drained into telemetry each tick).
+    pub events_log: Vec<(u32, Event, events::EventOutcome)>,
     /// 7.2 energy-balance accounting (kJ). Inflow from grain consumption, the
     /// amount actually drained from live agents, and energy removed from the
     /// pool when an agent despawns. Conservation: `Δ(live pool) = intake −
@@ -721,16 +724,37 @@ impl Simulation {
     }
 
     /// 2.5: inject an RLHF control event. Each event is logged with the current
-    /// frame so it appears as a ground-truth annotation in telemetry.
-    pub fn inject_event(&mut self, event: Event) {
+    /// frame so it appears as a ground-truth annotation in telemetry, and with
+    /// its application result (Sprint 5): an event that matched nothing (no-op)
+    /// is recorded as `NoOp`, never reported as success.
+    pub fn inject_event(&mut self, event: Event) -> events::EventOutcome {
         let frame = self.time.frame;
-        self.events_log.push((frame, event.clone()));
+        let outcome = self.apply_event(&event);
+        // Bound the journal: keep only the most recent entries (telemetry
+        // drains it every tick, so this only matters for a paused run).
+        self.events_log.push((frame, event.clone(), outcome));
+        if self.events_log.len() > Self::MAX_EVENTS_LOG {
+            let excess = self.events_log.len() - Self::MAX_EVENTS_LOG;
+            self.events_log.drain(..excess);
+        }
+        outcome
+    }
+
+    /// The maximum number of events retained in `events_log` between telemetry
+    /// drains. Prevents the journal growing without bound on a paused run.
+    pub const MAX_EVENTS_LOG: usize = 4096;
+
+    /// Apply an event and report whether it changed state (`Applied`) or
+    /// matched nothing (`NoOp`).
+    fn apply_event(&mut self, event: &Event) -> events::EventOutcome {
         match event {
             Event::SpawnGrain(req) => {
                 self.spawn_grain_entity(Vector2::new(req.pos[0], req.pos[1]), req.count);
+                events::EventOutcome::Applied
             }
             Event::SpawnPredator(req) => {
                 self.spawn_predator(Vector2::new(req.pos[0], req.pos[1]));
+                events::EventOutcome::Applied
             }
             Event::RemovePredator(req) => {
                 if let Some(id) = self.find_predator_uid(&req.uid) {
@@ -739,6 +763,9 @@ impl Simulation {
                     if let Some(h) = handle {
                         self.physics.remove_body(h);
                     }
+                    events::EventOutcome::Applied
+                } else {
+                    events::EventOutcome::NoOp
                 }
             }
             Event::SetWeather(req) => {
@@ -748,8 +775,10 @@ impl Simulation {
                 if req.weather == Weather::Wind {
                     self.environment.wind_heading = self.rng.gen_range(0.0..std::f64::consts::TAU);
                 }
+                events::EventOutcome::Applied
             }
             Event::TeleportAgent(req) => {
+                let mut found = false;
                 if let Some(id) = self.find_agent_uid(&req.uid) {
                     if let Ok(mut pos) = self.world.get::<&mut Position>(id) {
                         pos.0 = Vector2::new(req.pos[0], req.pos[1]);
@@ -762,6 +791,12 @@ impl Simulation {
                             );
                         }
                     }
+                    found = true;
+                }
+                if found {
+                    events::EventOutcome::Applied
+                } else {
+                    events::EventOutcome::NoOp
                 }
             }
             Event::KillAgent(req) => {
@@ -772,6 +807,9 @@ impl Simulation {
                         self.physics.remove_body(h);
                     }
                     self.deaths += 1;
+                    events::EventOutcome::Applied
+                } else {
+                    events::EventOutcome::NoOp
                 }
             }
         }
@@ -781,7 +819,6 @@ impl Simulation {
         self.time.tick();
         while self.time.consume_tick() {
             self.time.frame += 1;
-            self.time.time_us += (self.config.dt * 1_000_000.0) as u64;
             tick_fn(self, self.config.dt);
         }
     }
@@ -883,19 +920,52 @@ impl Simulation {
 
     /// 3.6: write a full checkpoint (world + RNG + time + physics + counters)
     /// to `path` in bincode format. See `checkpoint::build_checkpoint`.
+    ///
+    /// Sprint 5 (B16): the write is ATOMIC — the checkpoint is serialized to a
+    /// temp file, flushed to disk, then `rename`d over the target. An
+    /// interrupted write (crash, power loss, disk-full) leaves the previous
+    /// valid checkpoint intact instead of a truncated file at `path`.
+    ///
+    /// Sprint 5 (B16, release gate): the payload is prefixed with an
+    /// 8-byte magic + a 64-bit FNV-1a checksum over the bincode bytes, so a
+    /// corrupted-but-structurally-valid file (bit flips in padding, etc.) is
+    /// rejected on load instead of silently restoring wrong state. bincode is
+    /// not self-describing — without the checksum random corruption in
+    /// non-structural regions can deserialize cleanly.
     pub fn save_checkpoint(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         let ckpt = checkpoint::build_checkpoint(self)?;
         let bytes = bincode::serialize(&ckpt)?;
-        std::fs::write(path, bytes)?;
+        let mut header = Vec::with_capacity(16 + bytes.len());
+        header.extend_from_slice(checkpoint::CHECKPOINT_MAGIC);
+        header.extend_from_slice(&checkpoint::checksum_fnv1a(&bytes).to_le_bytes());
+        header.extend_from_slice(&bytes);
+        let tmp = format!("{path}.tmp");
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&header)?;
+            f.flush()?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp, path)?;
         Ok(())
     }
 
     /// 3.6: restore a full checkpoint written by `save_checkpoint`. The
     /// spatial grid is derived state and is rebuilt on the next tick, so it is
-    /// intentionally not restored here.
+    /// intentionally not restored here. Corrupt/truncated files (including a
+    /// wrong checksum) surface as `Err`, never a partial simulation.
     pub fn load_checkpoint(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let bytes = std::fs::read(path)?;
-        let ckpt: checkpoint::Checkpoint = bincode::deserialize(&bytes)?;
+        if bytes.len() < 16 || &bytes[..8] != checkpoint::CHECKPOINT_MAGIC {
+            return Err("checkpoint: missing magic header (not a v5+ checkpoint)".into());
+        }
+        let stored_checksum = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let payload = &bytes[16..];
+        if checkpoint::checksum_fnv1a(payload) != stored_checksum {
+            return Err("checkpoint: checksum mismatch (file corrupted or truncated)".into());
+        }
+        let ckpt: checkpoint::Checkpoint = bincode::deserialize(payload)?;
         if ckpt.version != checkpoint::CHECKPOINT_VERSION {
             return Err(format!(
                 "checkpoint version {} != expected {}",

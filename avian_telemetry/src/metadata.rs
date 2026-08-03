@@ -5,8 +5,8 @@
 //! parses observations by consulting THIS file, never by assuming a layout.
 //! A future `obs_v2` bumps `obs_schema` and keeps `obs_v1` rows readable.
 
-use std::path::Path;
 use serde::Serialize;
+use std::path::Path;
 
 /// The obs_v1 index table. Kept in sync with `rlhf::state_to_observation`.
 /// `[start..end)` are half-open ranges; scalars are `[i..i+1]`.
@@ -21,9 +21,18 @@ pub const OBS_V1_INDEX: &[(&str, &str)] = &[
     ("[9]", "light_level"),
     ("[10..16]", "nearest 3 grains rel pos (2 each)"),
     ("[16..37]", "7 neighbors rel pos + dist (3 each)"),
-    ("[37..43]", "predator rel pos + threat + alarm_flag (+2 reserved)"),
-    ("[43..51]", "memory locations (4.2 — all zero until it ships)"),
-    ("[51..127]", "reserved — all zero (future fields without renumbering)"),
+    (
+        "[37..43]",
+        "predator rel pos + threat + alarm_flag (+2 reserved)",
+    ),
+    (
+        "[43..51]",
+        "memory locations (4.2 — all zero until it ships)",
+    ),
+    (
+        "[51..127]",
+        "reserved — all zero (future fields without renumbering)",
+    ),
     ("[127]", "unused (kept zero)"),
 ];
 
@@ -141,7 +150,10 @@ impl TelemetryMetadata {
 
 pub fn write_metadata(path: &Path, meta: &TelemetryMetadata) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(meta).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("serialize metadata: {e}"))
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("serialize metadata: {e}"),
+        )
     })?;
     std::fs::write(path, json)
 }

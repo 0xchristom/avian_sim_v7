@@ -304,7 +304,7 @@ pub struct Checkpoint {
     /// dashboard (forage success rate, survival curve).
     pub grains_consumed: u64,
     pub death_ages: Vec<f64>,
-    pub events_log: Vec<(u32, Event)>,
+    pub events_log: Vec<(u32, Event, crate::events::EventOutcome)>,
     pub total_energy_intake_kj: f64,
     pub total_energy_expenditure_kj: f64,
     pub total_energy_lost_at_death_kj: f64,
@@ -320,7 +320,26 @@ pub struct Checkpoint {
     pub grain_vis_cache: Vec<GrainVisCacheSer>,
 }
 
-pub const CHECKPOINT_VERSION: u32 = 4;
+/// 5: +SimulationTime.frac_us (B27 sub-µs remainder), so the time wire format
+/// changed; old v4 checkpoints are rejected.
+pub const CHECKPOINT_VERSION: u32 = 5;
+
+/// 8-byte magic prefix written before the checksum + bincode payload in
+/// `save_checkpoint`. Guards against loading a non-checkpoint file.
+pub const CHECKPOINT_MAGIC: &[u8; 8] = b"AVIANCK1";
+
+/// 64-bit FNV-1a hash of a byte payload — the checkpoint integrity check.
+/// Deliberately dependency-free (no `crc`/`seahash` needed for a single hash
+/// per save/load). Bumped alongside `CHECKPOINT_VERSION` when the format
+/// changes; a checksum-only change does not require a version bump.
+pub fn checksum_fnv1a(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in data {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
 
 /// Serialize the world column into a `Vec<u8>` via bincode.
 pub fn serialize_world(world: &World) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

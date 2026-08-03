@@ -376,6 +376,7 @@ pub fn resolve_contact(
                     avian_core::events::Event::RemovePredator(
                         avian_core::events::RemovePredatorRequest { uid },
                     ),
+                    avian_core::events::EventOutcome::Applied,
                 ));
             }
         }

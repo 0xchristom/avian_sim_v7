@@ -10,33 +10,14 @@
             --accent: #00ffcc; --danger: #ff3366; --orange: #ff6c0c; 
             --btn-bg: #2a2f3a; --btn-hover: #3a4150;
         }
-        /* Sprint 5 (background task): the app background is the repo-owned
-           asset copied from `D:\Gemini\golebie\visuals\background no fireflies.jpg`
-           → `viewer/public/assets/background-no-fireflies.jpg`. The build only
-           references the relative `/assets/...` URL, never the source path. */
         body {
             margin: 0;
             background-color: var(--bg);
-            background-image: url('/assets/background-no-fireflies.jpg');
-            background-size: cover;
-            background-position: center;
-            background-attachment: fixed;
             color: var(--text);
             font-family: 'Courier New', monospace;
             display: flex;
             height: 100vh;
             overflow: hidden;
-        }
-        /* Semi-transparent overlay keeps text and the WebGL canvas readable
-           over the photo background (Sprint 5 background task item 3). Painted
-           above the image but below the app content. */
-        body::before {
-            content: '';
-            position: fixed;
-            inset: 0;
-            background: rgba(10, 11, 16, 0.72);
-            z-index: -1;
-            pointer-events: none;
         }
         
         .sidebar { 

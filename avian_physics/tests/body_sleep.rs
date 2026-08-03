@@ -50,7 +50,10 @@ fn changed_velocity_wakes_sleeping_body() {
     assert!(touched, "a real velocity change must be written");
     let rb = world.get_body(body).unwrap();
     assert!(!rb.is_sleeping(), "a moving body must be awake");
-    assert!((rb.linvel().x - 5.0).abs() < 1e-6, "velocity must be applied");
+    assert!(
+        (rb.linvel().x - 5.0).abs() < 1e-6,
+        "velocity must be applied"
+    );
 }
 
 #[test]
@@ -70,4 +73,3 @@ fn repeated_unchanged_writes_are_skipped_after_awake() {
     let drift = world.set_linvel_if_changed(body, Vector2::new(3.0 + 0.005, 0.0), 0.01);
     assert!(!drift, "sub-eps drift must be skipped");
 }
-

@@ -43,7 +43,7 @@ fn test_predator_expires_within_5_15s_and_logs_event() {
     let has_remove = sim
         .events_log
         .iter()
-        .any(|(_, e)| matches!(e, Event::RemovePredator(_)));
+        .any(|(_, e, _)| matches!(e, Event::RemovePredator(_)));
     assert!(
         has_remove,
         "predator despawn was not logged as RemovePredator"

@@ -19,6 +19,11 @@ export class WebGLRenderer {
   private scene: THREE.Scene;
   private camera: THREE.OrthographicCamera;
   private renderer: THREE.WebGLRenderer;
+  // Sprint 5 (background task): repo-owned photo (`viewer/public/assets/
+  // background-no-fireflies.jpg`) rendered as the arena floor backdrop behind
+  // the pigeons, not as a CSS window background.
+  private backgroundMesh: THREE.Mesh | null = null;
+  private backgroundTexture: THREE.Texture | null = null;
   private birdBodyMesh: THREE.InstancedMesh;
   private birdHeadMesh: THREE.InstancedMesh;
   private birdWingLMesh: THREE.InstancedMesh;
@@ -145,6 +150,34 @@ export class WebGLRenderer {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     this.renderer.setSize(800, 533);
     this.renderer.setClearColor(0x1a1c25);
+
+    // Sprint 5 (background task): the photo fills the arena where the pigeons
+    // walk. A single plane behind the grid; the texture is loaded async and
+    // covers the full 32×21 world at a "cover" aspect (crop the wider axis).
+    const bgLoader = new THREE.TextureLoader();
+    bgLoader.setCrossOrigin('anonymous');
+    this.backgroundTexture = bgLoader.load('/assets/background-no-fireflies.jpg');
+    const bgMat = new THREE.MeshBasicMaterial({
+      map: this.backgroundTexture,
+      depthTest: false,
+      depthWrite: false,
+      color: 0xffffff,
+    });
+    // Cover: fit the shorter world axis, crop the overflow on the other.
+    const img = 1664 / 928; // source aspect ratio (width / height)
+    const world = WebGLRenderer.WORLD_W / WebGLRenderer.WORLD_H;
+    let bw = WebGLRenderer.WORLD_W;
+    let bh = WebGLRenderer.WORLD_H;
+    if (img > world) {
+      bw = WebGLRenderer.WORLD_H * img; // wider → crop left/right
+    } else {
+      bh = WebGLRenderer.WORLD_W / img; // taller → crop top/bottom
+    }
+    const bgGeom = new THREE.PlaneGeometry(bw, bh);
+    this.backgroundMesh = new THREE.Mesh(bgGeom, bgMat);
+    this.backgroundMesh.position.set(WebGLRenderer.WORLD_W / 2, WebGLRenderer.WORLD_H / 2, -4);
+    this.backgroundMesh.renderOrder = -1;
+    this.scene.add(this.backgroundMesh);
 
     const grid = new THREE.GridHelper(64, 64, 0x333333, 0x222222);
     grid.rotation.x = Math.PI / 2;

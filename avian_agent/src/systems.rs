@@ -85,9 +85,20 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     crate::weather::update(sim);
 
     // 2.5: flush injected events to telemetry with their frame number
-    // (ground-truth annotations).
-    for (frame, ev) in sim.events_log.drain(..) {
-        exporter.log_event(frame, &serde_json::to_string(&ev).unwrap_or_default());
+    // (ground-truth annotations) and application result (Sprint 5: no-ops are
+    // recorded, not reported as success).
+    for (frame, ev, outcome) in sim.events_log.drain(..) {
+        let mut payload = match serde_json::to_value(&ev) {
+            Ok(serde_json::Value::Object(mut obj)) => {
+                if outcome == avian_core::events::EventOutcome::NoOp {
+                    obj.insert("noop".to_string(), serde_json::Value::Bool(true));
+                }
+                serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_default()
+            }
+            Ok(v) => serde_json::to_string(&v).unwrap_or_default(),
+            Err(_) => String::new(),
+        };
+        exporter.log_event(frame, &payload);
     }
 
     // 4.4: current weather multipliers, shared by every agent this frame so
@@ -777,6 +788,7 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
                 avian_core::events::Event::RemovePredator(
                     avian_core::events::RemovePredatorRequest { uid },
                 ),
+                avian_core::events::EventOutcome::Applied,
             ));
         }
     }

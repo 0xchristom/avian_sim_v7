@@ -56,6 +56,18 @@ pub enum Event {
     KillAgent(KillAgentRequest),
 }
 
+/// Sprint 5 (Audit 5): the application result of an injected event. A "no-op"
+/// is an event that matched nothing (e.g. a `KillAgent` for an unknown UID) —
+/// it must NOT be reported as success in the event journal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventOutcome {
+    /// The event changed simulation state.
+    Applied,
+    /// The event was well-formed but targeted nothing (unknown UID/entity) —
+    /// recorded so no-ops are not reported as success.
+    NoOp,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

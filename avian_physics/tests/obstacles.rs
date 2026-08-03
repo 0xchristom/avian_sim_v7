@@ -41,7 +41,11 @@ fn body_crosses_without_obstacle() {
     }
 
     let pos = world.get_body(body).unwrap().translation();
-    assert!(pos.x > 10.0, "control body should have passed x=10, got x = {:.2}", pos.x);
+    assert!(
+        pos.x > 10.0,
+        "control body should have passed x=10, got x = {:.2}",
+        pos.x
+    );
 }
 
 /// `cast_ray_to_static` reports a hit when a static obstacle lies on the
@@ -60,7 +64,10 @@ fn line_of_sight_respects_obstacles() {
 
     // From (4,5) toward (6,5): clear path, no static geometry on the way.
     let clear = world.cast_ray_to_static(Vector2::new(4.0, 5.0), Vector2::new(2.0, 0.0), 1.0);
-    assert!(clear.is_none(), "expected a clear LOS to (6,5), got {clear:?}");
+    assert!(
+        clear.is_none(),
+        "expected a clear LOS to (6,5), got {clear:?}"
+    );
 }
 
 /// Walls added via `add_wall` are fixed geometry too and block sight lines.
@@ -71,11 +78,17 @@ fn line_of_sight_respects_walls() {
 
     // Ray across the wall at y=5: wall at x=6, origin at x=2 → toi = 4/8 = 0.5.
     let hit = world.cast_ray_to_static(Vector2::new(2.0, 5.0), Vector2::new(8.0, 0.0), 1.0);
-    assert!(hit.is_some_and(|t| t < 1.0 - 1e-4), "wall should occlude, got {hit:?}");
+    assert!(
+        hit.is_some_and(|t| t < 1.0 - 1e-4),
+        "wall should occlude, got {hit:?}"
+    );
 
     // Parallel to the wall (at y=12, above its y=0..10 span): never intersects.
     let clear = world.cast_ray_to_static(Vector2::new(2.0, 12.0), Vector2::new(8.0, 0.0), 1.0);
-    assert!(clear.is_none(), "parallel ray should not hit the wall, got {clear:?}");
+    assert!(
+        clear.is_none(),
+        "parallel ray should not hit the wall, got {clear:?}"
+    );
 }
 
 /// Dynamic bodies are never occluders — only static geometry blocks vision.
@@ -86,7 +99,10 @@ fn dynamic_bodies_do_not_block_sight() {
     world.spawn_agent_body(Vector2::new(6.0, 5.0), 0.3);
 
     let hit = world.cast_ray_to_static(Vector2::new(4.0, 5.0), Vector2::new(8.0, 0.0), 1.0);
-    assert!(hit.is_none(), "dynamic agent should not block LOS, got {hit:?}");
+    assert!(
+        hit.is_none(),
+        "dynamic agent should not block LOS, got {hit:?}"
+    );
 }
 
 /// Sprint 2 (Audit 5, B9): the coarse static broad-phase culls open-space rays
@@ -101,7 +117,11 @@ fn raycast_counter_stays_zero_for_open_space() {
     // Far away from the obstacle — coarse broad-phase clears it.
     let clear = world.cast_ray_to_static(Vector2::new(4.0, 5.0), Vector2::new(2.0, 0.0), 1.0);
     assert!(clear.is_none());
-    assert_eq!(world.los_raycast_count(), 0, "open-space ray must not reach Rapier");
+    assert_eq!(
+        world.los_raycast_count(),
+        0,
+        "open-space ray must not reach Rapier"
+    );
 }
 
 /// Sprint 2 (Audit 5, B9/B24): a ray that genuinely approaches a static
@@ -114,7 +134,11 @@ fn raycast_counter_counts_blocked_rays() {
 
     let hit = world.cast_ray_to_static(Vector2::new(4.0, 5.0), Vector2::new(10.0, 0.0), 1.0);
     assert!(hit.is_some(), "obstacle on the segment must be detected");
-    assert_eq!(world.los_raycast_count(), 1, "blocked ray must reach Rapier exactly once");
+    assert_eq!(
+        world.los_raycast_count(),
+        1,
+        "blocked ray must reach Rapier exactly once"
+    );
 
     // After reset, a blocked ray counts again.
     world.reset_raycast_count();
@@ -132,7 +156,10 @@ fn ray_starting_inside_obstacle_is_detected() {
     world.add_obstacle(Vector2::new(8.0, 0.0), Vector2::new(10.0, 10.0));
 
     let hit = world.cast_ray_to_static(Vector2::new(9.0, 5.0), Vector2::new(-2.0, 0.0), 1.0);
-    assert!(hit.is_some(), "ray leaving an obstacle must still report the wall, got {hit:?}");
+    assert!(
+        hit.is_some(),
+        "ray leaving an obstacle must still report the wall, got {hit:?}"
+    );
 }
 
 /// Sprint 2 (Audit 5, B9): a ray ENDING just before a static collider is clear;
@@ -144,7 +171,10 @@ fn ray_ending_before_obstacle_is_clear() {
     world.add_obstacle(Vector2::new(8.0, 0.0), Vector2::new(10.0, 10.0));
 
     let clear = world.cast_ray_to_static(Vector2::new(4.0, 5.0), Vector2::new(3.99, 0.0), 1.0);
-    assert!(clear.is_none(), "segment stopping before the box must be clear, got {clear:?}");
+    assert!(
+        clear.is_none(),
+        "segment stopping before the box must be clear, got {clear:?}"
+    );
 }
 
 /// Sprint 2 (Audit 5, B9): a ray GRAZING the obstacle's edge (passing within a
@@ -170,13 +200,24 @@ fn broadphase_survives_checkpoint_roundtrip() {
     world.add_wall(Vector2::new(6.0, 0.0), Vector2::new(6.0, 10.0));
     let state = world.to_state();
     let restored = PhysicsWorld::from_state(state);
-    assert_eq!(restored.static_broadphase.len(), 2, "both AABBs survive roundtrip");
+    assert_eq!(
+        restored.static_broadphase.len(),
+        2,
+        "both AABBs survive roundtrip"
+    );
 
     // A blocked ray is still detected after restore.
     let hit = restored.cast_ray_to_static(Vector2::new(4.0, 5.0), Vector2::new(10.0, 0.0), 1.0);
-    assert!(hit.is_some(), "restored world must still detect the obstacle, got {hit:?}");
+    assert!(
+        hit.is_some(),
+        "restored world must still detect the obstacle, got {hit:?}"
+    );
     // An open-space ray is still culled (counter stays 0).
     let clear = restored.cast_ray_to_static(Vector2::new(4.0, 5.0), Vector2::new(1.0, 0.0), 1.0);
     assert!(clear.is_none());
-    assert_eq!(restored.los_raycast_count(), 1, "only the blocked ray reaches Rapier");
+    assert_eq!(
+        restored.los_raycast_count(),
+        1,
+        "only the blocked ray reaches Rapier"
+    );
 }

@@ -20,6 +20,12 @@ pub struct SimulationTime {
     pub frame: u32,
     pub time_us: u64,
     pub accumulator: f64,
+    /// Sprint 5 (B27): sub-microsecond remainder carried forward between steps
+    /// so `time_us` never drifts from `frame * dt`. `dt * 1e6` is not a whole
+    /// number (e.g. 1/120 s → 8333.33 µs), so a naive `as u64` truncation loses
+    /// ~0.33 µs/tick — 3.3 ms after 10,000 steps. This field keeps the exact
+    /// fractional remainder instead.
+    frac_us: f64,
 }
 
 impl SimulationTime {
@@ -35,6 +41,7 @@ impl SimulationTime {
             frame: 0,
             time_us: 0,
             accumulator: 0.0,
+            frac_us: 0.0,
         }
     }
 
@@ -48,9 +55,15 @@ impl SimulationTime {
 
     /// Consume exactly one fixed step if one is due. Returns `false` when the
     /// accumulated sim-time is less than one full `dt` (nothing to advance).
+    /// Advances `time_us` by exactly `dt` microseconds with a fractional
+    /// remainder (B27) so long runs never accumulate truncation drift.
     pub fn consume_tick(&mut self) -> bool {
         if self.accumulator >= self.dt {
             self.accumulator -= self.dt;
+            self.frac_us += self.dt * 1_000_000.0;
+            let whole = self.frac_us.floor();
+            self.frac_us -= whole;
+            self.time_us += whole as u64;
             true
         } else {
             false

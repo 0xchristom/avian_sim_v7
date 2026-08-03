@@ -118,7 +118,7 @@ fn test_predator_despawns_after_three_meals() {
     let has_remove = sim
         .events_log
         .iter()
-        .any(|(_, e)| matches!(e, Event::RemovePredator(r) if r.uid == predator_uid));
+        .any(|(_, e, _)| matches!(e, Event::RemovePredator(r) if r.uid == predator_uid));
     assert!(
         has_remove,
         "3-meal despawn was not logged as RemovePredator"

@@ -1,6 +1,6 @@
-use rapier2d::prelude::*;
 use nalgebra::Vector2;
-use serde::{Serialize, Deserialize};
+use rapier2d::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Sprint 2 (Audit 5, B9/B24): coarse broad-phase over STATIC obstacles.
@@ -57,7 +57,10 @@ impl StaticObstacleBroadphase {
         let (max_cx, max_cy) = self.cell_of(max.x, max.y);
         for cx in min_cx..=max_cx {
             for cy in min_cy..=max_cy {
-                self.cells.entry(Self::key_of(cx, cy)).or_default().push(idx);
+                self.cells
+                    .entry(Self::key_of(cx, cy))
+                    .or_default()
+                    .push(idx);
             }
         }
     }
@@ -236,7 +239,11 @@ impl PhysicsWorld {
     }
 
     pub fn add_wall(&mut self, p1: Vector2<f32>, p2: Vector2<f32>) {
-        let collider = ColliderBuilder::segment(nalgebra::Point2::new(p1.x, p1.y), nalgebra::Point2::new(p2.x, p2.y)).build();
+        let collider = ColliderBuilder::segment(
+            nalgebra::Point2::new(p1.x, p1.y),
+            nalgebra::Point2::new(p2.x, p2.y),
+        )
+        .build();
         self.colliders.insert(collider);
         // Static geometry must be queryable immediately (the query pipeline's
         // BVH is otherwise only refreshed inside `step`).
@@ -259,7 +266,8 @@ impl PhysicsWorld {
         let rb = RigidBodyBuilder::fixed().translation(center).build();
         let handle = self.bodies.insert(rb);
         let collider = ColliderBuilder::cuboid(half.x, half.y).build();
-        self.colliders.insert_with_parent(collider, handle, &mut self.bodies);
+        self.colliders
+            .insert_with_parent(collider, handle, &mut self.bodies);
         self.query_pipeline.update(&self.bodies, &self.colliders);
         // Sprint 2 (Audit 5, B9): register the box in the coarse broad-phase.
         self.static_broadphase.insert(min, max);
@@ -276,43 +284,66 @@ impl PhysicsWorld {
     /// `los_raycast_count`); open-space rays short-circuit to `None` without
     /// touching the query pipeline. Determinism is preserved because `may_hit`
     /// is conservative — it never reports "clear" for a ray that would hit.
-    pub fn cast_ray_to_static(&self, origin: Vector2<f64>, dir: Vector2<f64>, max_toi: f64) -> Option<f64> {
+    pub fn cast_ray_to_static(
+        &self,
+        origin: Vector2<f64>,
+        dir: Vector2<f64>,
+        max_toi: f64,
+    ) -> Option<f64> {
         if !self.static_broadphase.may_hit(origin, dir, max_toi) {
             return None;
         }
-        self.los_raycast_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.los_raycast_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let ray = Ray::new(
             nalgebra::Point2::new(origin.x as f32, origin.y as f32),
             Vector2::new(dir.x as f32, dir.y as f32),
         );
         self.query_pipeline
-            .cast_ray(&self.bodies, &self.colliders, &ray, max_toi as f32, true, QueryFilter::only_fixed())
+            .cast_ray(
+                &self.bodies,
+                &self.colliders,
+                &ray,
+                max_toi as f32,
+                true,
+                QueryFilter::only_fixed(),
+            )
             .map(|(_, toi)| toi as f64)
     }
 
     /// Sprint 2 (Audit 5, B9): reset the authoritative-raycast counter so a
     /// caller can measure raycast traffic per frame.
     pub fn reset_raycast_count(&mut self) {
-        self.los_raycast_count.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.los_raycast_count
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Sprint 2 (Audit 5, B9): number of authoritative Rapier raycasts issued
     /// since the last reset.
     pub fn los_raycast_count(&self) -> u64 {
-        self.los_raycast_count.load(std::sync::atomic::Ordering::Relaxed)
+        self.los_raycast_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn spawn_agent_body(&mut self, pos: Vector2<f32>, mass: f32) -> u64 {
         let rb = RigidBodyBuilder::dynamic()
             .translation(nalgebra::Vector2::new(pos.x, pos.y))
-            .additional_mass_properties(MassProperties::new(nalgebra::Point2::new(0.0, 0.0), mass, 0.01))
+            .additional_mass_properties(MassProperties::new(
+                nalgebra::Point2::new(0.0, 0.0),
+                mass,
+                0.01,
+            ))
             .linear_damping(1.0)
             .angular_damping(1.0) // Zapobiega niekontrolowanemu wirowaniu kuli
             .build();
-        
+
         let handle = self.bodies.insert(rb);
-        let collider = ColliderBuilder::ball(0.4).restitution(0.2).friction(0.8).build();
-        self.colliders.insert_with_parent(collider, handle, &mut self.bodies);
+        let collider = ColliderBuilder::ball(0.4)
+            .restitution(0.2)
+            .friction(0.8)
+            .build();
+        self.colliders
+            .insert_with_parent(collider, handle, &mut self.bodies);
 
         pack_handle(handle)
     }
@@ -321,13 +352,21 @@ impl PhysicsWorld {
     pub fn spawn_predator_body(&mut self, pos: Vector2<f32>, mass: f32) -> u64 {
         let rb = RigidBodyBuilder::dynamic()
             .translation(nalgebra::Vector2::new(pos.x, pos.y))
-            .additional_mass_properties(MassProperties::new(nalgebra::Point2::new(0.0, 0.0), mass, 0.05))
+            .additional_mass_properties(MassProperties::new(
+                nalgebra::Point2::new(0.0, 0.0),
+                mass,
+                0.05,
+            ))
             .linear_damping(1.0)
             .angular_damping(1.0)
             .build();
         let handle = self.bodies.insert(rb);
-        let collider = ColliderBuilder::ball(0.5).restitution(0.2).friction(0.8).build();
-        self.colliders.insert_with_parent(collider, handle, &mut self.bodies);
+        let collider = ColliderBuilder::ball(0.5)
+            .restitution(0.2)
+            .friction(0.8)
+            .build();
+        self.colliders
+            .insert_with_parent(collider, handle, &mut self.bodies);
         pack_handle(handle)
     }
 
@@ -387,10 +426,19 @@ impl PhysicsWorld {
         let physics_hooks = ();
         let event_handler = ();
         self.pipeline.step(
-            &self.gravity, &self.integration_parameters, &mut self.island_manager, &mut self.broad_phase,
-            &mut self.narrow_phase, &mut self.bodies, &mut self.colliders, &mut self.impulse_joints,
-            &mut self.multibody_joints, &mut self.ccd_solver, Some(&mut self.query_pipeline),
-            &physics_hooks, &event_handler,
+            &self.gravity,
+            &self.integration_parameters,
+            &mut self.island_manager,
+            &mut self.broad_phase,
+            &mut self.narrow_phase,
+            &mut self.bodies,
+            &mut self.colliders,
+            &mut self.impulse_joints,
+            &mut self.multibody_joints,
+            &mut self.ccd_solver,
+            Some(&mut self.query_pipeline),
+            &physics_hooks,
+            &event_handler,
         );
     }
 
