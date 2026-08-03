@@ -37,7 +37,7 @@ fn remember_food(slots: &mut Vec<MemorySlot>, pos: Vector2<f64>) {
         if let Some(idx) = slots
             .iter()
             .enumerate()
-            .min_by(|a, b| a.1.strength.partial_cmp(&b.1.strength).unwrap())
+            .min_by(|a, b| a.1.strength.partial_cmp(&b.1.strength).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, _)| i)
         {
             slots.remove(idx);
@@ -145,7 +145,7 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
                 .max_by(|a, b| {
                     a.strength
                         .partial_cmp(&b.strength)
-                        .unwrap()
+                        .unwrap_or(std::cmp::Ordering::Equal)
                         .then(a.ttl_frames.cmp(&b.ttl_frames))
                 })
                 .map(|s| s.pos)

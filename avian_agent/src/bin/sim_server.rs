@@ -11,6 +11,23 @@ use tungstenite::accept;
 use std::net::TcpStream;
 use tungstenite::WebSocket;
 
+/// Audit 2 Task 1: outbound broadcast pacing interval (~60 Hz real time).
+/// Decouples the network send rate from the sim step rate so speed 1×/10×/100×
+/// can't flood the browser or fill the non-blocking socket's send buffer.
+const BROADCAST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// Audit 2 Task 1: classify a WebSocket send error. `WouldBlock` on a
+/// non-blocking socket just means the OS send buffer is full (the client is
+/// momentarily behind) — skip that client this broadcast, NOT a disconnect.
+/// Any other error is a genuine I/O failure and disconnects the client, in
+/// line with the existing read-path classification.
+fn send_error_is_fatal(err: &tungstenite::Error) -> bool {
+    match err {
+        tungstenite::Error::Io(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
+        _ => true,
+    }
+}
+
 fn main() {
     // Parse CLI args: --headless [--frames N] [--output path] [--events-file path] [--seed N]
     let args: Vec<String> = std::env::args().collect();
@@ -198,6 +215,11 @@ fn main() {
     let mut speed: f64 = 1.0;
     // 6.2: dashboard metrics are pushed every N frames (not every frame).
     let mut metrics_pending = true;
+    // Audit 2 Task 1: wall-clock pacing for the outbound broadcast. Snapshot /
+    // metrics / event-log messages are sent at most every BROADCAST_INTERVAL
+    // of real time regardless of `speed`, which only drives how fast
+    // `sim.step()` runs. Incoming client messages are handled every iteration.
+    let mut last_broadcast = std::time::Instant::now();
 
     while running.load(Ordering::SeqCst) {
         // Accept new connections
@@ -228,11 +250,14 @@ fn main() {
         if frame % 100 == 0 {
             metrics_pending = true;
         }
-        let snap = sim.snapshot();
-        let json = serde_json::to_string(&snap).unwrap();
 
-        // Handle client messages and send snapshots
         let mut disconnected: Vec<usize> = Vec::new();
+
+        // ---- Step 1: handle incoming client messages (EVERY iteration) ----
+        // Transport control commands (pause/step/speed) and injected events
+        // must be processed on every loop iteration, completely independent of
+        // the broadcast pacing below, so the UI stays instantly responsive at
+        // any speed setting.
         for (i, ws) in clients.iter_mut().enumerate() {
             // Read incoming messages
             loop {
@@ -279,42 +304,80 @@ fn main() {
                     Err(_) => { disconnected.push(i); break; }
                 }
             }
+        }
 
-            // Send snapshot
-            if ws.send(tungstenite::Message::Text(json.clone())).is_err() {
-                disconnected.push(i);
-            }
+        // ---- Step 2: broadcast outgoing state (paced to ~60 Hz real time) ----
+        // Audit 2 Task 1: the snapshot + metrics + event-log payloads are only
+        // built and sent when at least BROADCAST_INTERVAL of wall-clock time
+        // has elapsed since the last broadcast. This is metadata/network pacing
+        // only — it never influences simulation state, dt, or the RNG.
+        let now = std::time::Instant::now();
+        if now.duration_since(last_broadcast) >= BROADCAST_INTERVAL {
+            last_broadcast = now;
+
+            // Build each payload ONCE per broadcast tick, not once per client.
+            let snap = sim.snapshot();
+            let json = serde_json::to_string(&snap).unwrap();
 
             // 6.1: surface injected scenario events to every client (event log).
-            if !pending_events.is_empty() {
+            let event_msg: Option<String> = if !pending_events.is_empty() {
                 let events_json: Vec<serde_json::Value> = pending_events
                     .iter()
                     .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
                     .collect();
-                let ev_msg = serde_json::json!({
+                Some(serde_json::json!({
                     "type": "event_log",
                     "frame": frame,
                     "events": events_json,
-                }).to_string();
-                if ws.send(tungstenite::Message::Text(ev_msg)).is_err() {
-                    disconnected.push(i);
+                }).to_string())
+            } else {
+                None
+            };
+
+            // 6.2: dashboard metrics every ~100 frames (cheap aggregate pass).
+            let metrics_msg: Option<String> = if metrics_pending {
+                let m = compute_metrics(&snap, sim.predator_kills, sim.grains_consumed, &sim.death_ages);
+                Some(serde_json::json!({
+                    "type": "metrics",
+                    "metrics": m,
+                }).to_string())
+            } else {
+                None
+            };
+
+            for (i, ws) in clients.iter_mut().enumerate() {
+                // Send snapshot. WouldBlock → skip this client this broadcast
+                // (try again next time); any genuine error → disconnect.
+                if let Err(e) = ws.send(tungstenite::Message::Text(json.clone())) {
+                    if send_error_is_fatal(&e) {
+                        disconnected.push(i);
+                    }
+                }
+
+                if let Some(ev_msg) = &event_msg {
+                    if let Err(e) = ws.send(tungstenite::Message::Text(ev_msg.clone())) {
+                        if send_error_is_fatal(&e) {
+                            disconnected.push(i);
+                        }
+                    }
+                }
+
+                if let Some(m_msg) = &metrics_msg {
+                    if let Err(e) = ws.send(tungstenite::Message::Text(m_msg.clone())) {
+                        if send_error_is_fatal(&e) {
+                            disconnected.push(i);
+                        }
+                    }
                 }
             }
 
-            // 6.2: dashboard metrics every ~100 frames (cheap aggregate pass).
-            if metrics_pending {
-                let m = compute_metrics(&snap, sim.predator_kills, sim.grains_consumed, &sim.death_ages);
-                let m_msg = serde_json::json!({
-                    "type": "metrics",
-                    "metrics": m,
-                }).to_string();
-                if ws.send(tungstenite::Message::Text(m_msg)).is_err() {
-                    disconnected.push(i);
-                }
-            }
+            // Pending state is only cleared once it has actually been included
+            // in a broadcast — never unconditionally on every loop iteration,
+            // otherwise metrics/event-log messages would be silently dropped
+            // whenever the sim runs faster than the broadcast rate.
+            pending_events.clear();
+            metrics_pending = false;
         }
-        pending_events.clear();
-        metrics_pending = false;
 
         // Remove disconnected clients (in reverse order to keep indices valid)
         disconnected.sort_unstable();

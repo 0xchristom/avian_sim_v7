@@ -102,7 +102,7 @@ pub fn state_to_observation(
     grains_sorted.sort_by(|a, b| {
         let da = ((a[0] - agent.pos[0]).powi(2) + (a[1] - agent.pos[1]).powi(2)).sqrt();
         let db = ((b[0] - agent.pos[0]).powi(2) + (b[1] - agent.pos[1]).powi(2)).sqrt();
-        da.partial_cmp(&db).unwrap()
+        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
     });
     for (i, g) in grains_sorted.iter().take(calibration::OBS_GRAIN_COUNT).enumerate() {
         let base = 10 + i * 2;
@@ -115,7 +115,7 @@ pub fn state_to_observation(
     neigh_sorted.sort_by(|a, b| {
         let da = ((a[0] - agent.pos[0]).powi(2) + (a[1] - agent.pos[1]).powi(2)).sqrt();
         let db = ((b[0] - agent.pos[0]).powi(2) + (b[1] - agent.pos[1]).powi(2)).sqrt();
-        da.partial_cmp(&db).unwrap()
+        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
     });
     for (i, n) in neigh_sorted.iter().take(calibration::OBS_NEIGHBOR_COUNT).enumerate() {
         let base = 16 + i * 3;

@@ -29,7 +29,9 @@ export class WebGLRenderer {
   private nightOverlay: THREE.Mesh;
   private weatherOverlay: THREE.Mesh;
   private obstacleGroup: THREE.Group;
-  private predatorLabels: THREE.Sprite[] = [];
+  // Audit 2 Task 4: predator lifetime labels cached per uid — the canvas +
+  // texture are only rebuilt when the displayed value changes, not every frame.
+  private predatorLabels = new Map<string, { sprite: THREE.Sprite; text: string; texture: THREE.CanvasTexture }>();
   private selectionMarkers: THREE.Mesh[] = [];
   // 6.1: FOV cone pool — one mesh per hovered/selected agent, reused (no per-frame GC).
   private fovCones: THREE.Mesh[] = [];
@@ -38,6 +40,10 @@ export class WebGLRenderer {
   // 6.1: flock viz — line segments between agents within the flock radius.
   private neighborLines: THREE.LineSegments;
   private neighborGeom: THREE.BufferGeometry;
+  // Audit 2 Task 2: flock/neighbor line toggle. Default on (matches previous
+  // behavior); when off, both the rendering AND the per-frame pair scan are
+  // skipped.
+  private neighborLinesVisible = true;
   // 6.1: memory dots — instanced fading dots at remembered food locations.
   private memoryDots: THREE.InstancedMesh;
   // 6.4: viewport camera — zoom (scale factor) + center pan (world units).
@@ -267,6 +273,13 @@ export class WebGLRenderer {
     this.viewCenter.x = WebGLRenderer.WORLD_W / 2;
     this.viewCenter.y = WebGLRenderer.WORLD_H / 2;
     this.applyCamera();
+  }
+
+  // Audit 2 Task 2: toggle the flock/neighbor connection lines. When hidden,
+  // `updateNeighborLines()` is also skipped entirely (no per-frame pair scan).
+  setNeighborLinesVisible(visible: boolean) {
+    this.neighborLinesVisible = visible;
+    this.neighborLines.visible = visible;
   }
 
   // 6.4: convert a mouse pixel (relative to the canvas) to world coordinates.
@@ -509,8 +522,11 @@ export class WebGLRenderer {
     // 4.3: draw the static urban obstacles.
     this.updateObstacles(snapshot.obstacles || []);
 
-    // 6.1: flock neighbor connection lines between nearby agents.
-    this.updateNeighborLines(snapshot.agents || []);
+    // 6.1: flock neighbor connection lines between nearby agents. Audit 2
+    // Task 2: skip the O(n²) pair scan entirely when the lines are hidden.
+    if (this.neighborLinesVisible) {
+      this.updateNeighborLines(snapshot.agents || []);
+    }
 
     // 6.1: memory dots — remembered food as fading dots per agent.
     this.updateMemoryDots(snapshot.agents || []);
@@ -668,38 +684,55 @@ export class WebGLRenderer {
     });
   }
 
-  private updatePredatorLabels(predators: Array<{ pos: [number, number]; lifetime_remaining_s: number }>) {
-    for (const label of this.predatorLabels) {
-      this.scene.remove(label);
-      label.material.map?.dispose();
-      label.material.dispose();
-    }
-    this.predatorLabels = [];
-
+  private updatePredatorLabels(predators: Array<{ uid?: string; pos: [number, number]; lifetime_remaining_s: number }>) {
+    const live = new Set<string>();
     predators.forEach((p) => {
+      const uid = p.uid ?? `${p.pos[0]},${p.pos[1]}`;
+      live.add(uid);
       const seconds = Math.max(0, p.lifetime_remaining_s ?? 0).toFixed(1);
-      const canvas = document.createElement('canvas');
-      canvas.width = 96;
-      canvas.height = 40;
-      const g = canvas.getContext('2d')!;
-      g.clearRect(0, 0, canvas.width, canvas.height);
-      g.font = 'bold 28px monospace';
-      g.textAlign = 'center';
-      g.textBaseline = 'middle';
-      g.fillStyle = '#000';
-      g.fillText(seconds, 48, 20);
-      g.fillStyle = '#ffffff';
-      g.fillText(seconds, 47, 19);
 
-      const texture = new THREE.CanvasTexture(canvas);
-      const mat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
-      const sprite = new THREE.Sprite(mat);
-      sprite.position.set(p.pos[0] + 0.9, p.pos[1] + 0.9, 1);
-      sprite.scale.set(1.1, 0.46, 1);
-      sprite.renderOrder = 1000;
-      this.scene.add(sprite);
-      this.predatorLabels.push(sprite);
+      // Audit 2 Task 4: reuse the cached sprite if the predator already has a
+      // label — only rebuild the canvas/texture when the value actually changed.
+      let cached = this.predatorLabels.get(uid);
+      if (!cached) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 96;
+        canvas.height = 40;
+        const texture = new THREE.CanvasTexture(canvas);
+        const mat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+        const sprite = new THREE.Sprite(mat);
+        sprite.scale.set(1.1, 0.46, 1);
+        sprite.renderOrder = 1000;
+        this.scene.add(sprite);
+        cached = { sprite, text: '', texture };
+        this.predatorLabels.set(uid, cached);
+      }
+      cached.sprite.position.set(p.pos[0] + 0.9, p.pos[1] + 0.9, 1);
+
+      if (cached.text !== seconds) {
+        const g = cached.texture.image.getContext('2d')!;
+        g.clearRect(0, 0, 96, 40);
+        g.font = 'bold 28px monospace';
+        g.textAlign = 'center';
+        g.textBaseline = 'middle';
+        g.fillStyle = '#000';
+        g.fillText(seconds, 48, 20);
+        g.fillStyle = '#ffffff';
+        g.fillText(seconds, 47, 19);
+        cached.texture.needsUpdate = true;
+        cached.text = seconds;
+      }
     });
+
+    // Prune labels for predators that left the sim.
+    for (const [uid, entry] of this.predatorLabels) {
+      if (!live.has(uid)) {
+        this.scene.remove(entry.sprite);
+        entry.texture.dispose();
+        (entry.sprite.material as THREE.Material).dispose();
+        this.predatorLabels.delete(uid);
+      }
+    }
   }
 
   private updateSelectionMarkers(snapshot: any, selectedUids: string[]) {

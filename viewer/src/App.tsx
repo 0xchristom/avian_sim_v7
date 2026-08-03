@@ -30,6 +30,8 @@ const App: React.FC = () => {
   const [fps, setFps] = useState(0);
   const fpsRef = useRef({ frames: 0, last: performance.now() });
   const reconnectDelayRef = useRef(1000);
+  // Audit 2 Task 2: flock/neighbor connection line visibility (default on).
+  const [neighborLinesVisible, setNeighborLinesVisible] = useState(true);
 
   useEffect(() => {
     if (canvasRef.current) { rendererRef.current = new WebGLRenderer(canvasRef.current); }
@@ -326,6 +328,19 @@ const App: React.FC = () => {
               </button>
             ))}
           </div>
+          {/* Audit 2 Task 2: flock/neighbor connection lines toggle (default on). */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#d4d4d4', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={neighborLinesVisible}
+              onChange={(e) => {
+                const v = e.target.checked;
+                setNeighborLinesVisible(v);
+                rendererRef.current?.setNeighborLinesVisible(v);
+              }}
+            />
+            Flock lines
+          </label>
         </div>
 
         <div style={{ padding: '12px', flex: 1 }}>

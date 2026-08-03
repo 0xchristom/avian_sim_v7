@@ -9,11 +9,15 @@
 //!    with altered parameters).
 
 use avian_core::{Simulation, SimulationConfig};
+use avian_core::checkpoint::{deserialize_world, serialize_world};
 use avian_core::components::{FSMState, Position, Metabolism, AgentUid};
 use avian_agent::gerontology::spawn_agent;
 use avian_agent::systems::{run_systems, spawn_grain};
 use avian_telemetry::exporter::TelemetryExporter;
+use hecs::World;
 use nalgebra::Vector2;
+use std::any::TypeId;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 fn setup_sim() -> Simulation {
@@ -175,4 +179,61 @@ fn test_checkpoint_determinism_continuation() {
     }
 
     let _ = std::fs::remove_file(&path);
+}
+
+/// Audit 2 Task 5: guard against the checkpoint's hand-maintained component
+/// registry silently dropping a component that spawn logic uses.
+///
+/// `checkpoint.rs` keeps a manual `ComponentId` list of every type included in
+/// the world serialization; it must stay in sync with what `spawn_agent` /
+/// `spawn_grain` / `spawn_predator` actually insert. If someone adds a new
+/// component to a spawn path and forgets to register it, the code still
+/// compiles but that column is silently dropped from every checkpoint.
+///
+/// This test closes that gap: it spawns the three entity kinds, round-trips
+/// the world through `serialize_world`/`deserialize_world`, and asserts that
+/// the set of component types present in the live world's archetypes is
+/// byte-identical to the set present after restore. A forgotten component
+/// shows up as a missing `TypeId` and fails the assertion.
+#[test]
+fn test_checkpoint_registers_every_spawned_component() {
+    let mut sim = Simulation::new(7, SimulationConfig::default());
+    for _ in 0..5 {
+        let uid = sim.next_uid_str();
+        spawn_agent(
+            &mut sim.world,
+            &mut sim.rng,
+            Vector2::new(5.0, 5.0),
+            &mut sim.physics,
+            uid,
+        );
+    }
+    spawn_grain(&mut sim, Vector2::new(3.0, 3.0), 20);
+    sim.spawn_predator(Vector2::new(16.0, 10.5));
+
+    fn component_type_ids(world: &World) -> BTreeSet<TypeId> {
+        world
+            .archetypes()
+            .flat_map(|a| a.component_types())
+            .collect()
+    }
+
+    let before = component_type_ids(&sim.world);
+    let bytes = serialize_world(&sim.world).expect("serialize world");
+    let restored = deserialize_world(&bytes).expect("deserialize world");
+    let after = component_type_ids(&restored);
+
+    let missing: Vec<TypeId> = before.difference(&after).copied().collect();
+    assert!(
+        missing.is_empty(),
+        "checkpoint dropped component types used at spawn time: {missing:?} — \
+         add them to the ComponentId list in avian_core/src/checkpoint.rs"
+    );
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "checkpoint registered-set mismatch: {} types in, {} out",
+        before.len(),
+        after.len()
+    );
 }

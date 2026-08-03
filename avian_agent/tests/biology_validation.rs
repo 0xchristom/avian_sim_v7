@@ -132,7 +132,7 @@ fn spawn_age_distribution_matches_vitality_weibull() {
     let n = 5000;
     let mut ages: Vec<f64> = (0..n).map(|_| sample_age(&mut rng).years).collect();
 
-    ages.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    ages.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     // Stable-age density ∝ S(t) skews young — median ≈ 2.3 yr.
     let median = ages[n / 2];
