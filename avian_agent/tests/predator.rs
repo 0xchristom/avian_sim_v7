@@ -1,10 +1,10 @@
 //! 2.2 acceptance: with 1 predator + 30 agents over a headless run, ≥80% of
 //! agents experience ≥1 fleeing event, and the predator captures agents.
 
-use avian_core::{Simulation, SimulationConfig};
-use avian_core::components::{Alarm, AgentUid};
-use avian_agent::systems::run_systems;
 use avian_agent::gerontology::spawn_agent;
+use avian_agent::systems::run_systems;
+use avian_core::components::{AgentUid, Alarm};
+use avian_core::{Simulation, SimulationConfig};
 use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 use std::collections::HashSet;
@@ -30,7 +30,13 @@ fn setup_predator_sim() -> Simulation {
         let x = center.x + sim.rng.gen_range(-5.0..5.0);
         let y = center.y + sim.rng.gen_range(-5.0..5.0);
         let uid = sim.next_uid_str();
-        spawn_agent(&mut sim.world, &mut sim.rng, Vector2::new(x, y), &mut sim.physics, uid);
+        spawn_agent(
+            &mut sim.world,
+            &mut sim.rng,
+            Vector2::new(x, y),
+            &mut sim.physics,
+            uid,
+        );
     }
     sim.spawn_predator(center);
     sim

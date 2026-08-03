@@ -16,10 +16,10 @@
 //!    (1.0m, ≈ combined body radii; a 0.3m gap is unreachable while the 0.4+0.5
 //!    colliders overlap-free) → 50% kill / 50% miss+cooldown.
 
-use avian_core::Simulation;
 use avian_core::calibration;
 use avian_core::components::*;
 use avian_core::rng::SimRng;
+use avian_core::Simulation;
 use hecs::Entity;
 use nalgebra::Vector2;
 use rustc_hash::FxHashMap;
@@ -39,18 +39,19 @@ pub fn collect_threats(sim: &Simulation) -> FxHashMap<Entity, Vector2<f64>> {
         return threats;
     }
 
-    for (id, (pos, head, vision, _meta, fsm)) in
-        sim.world.query::<(&Position, &Heading, &Vision, &Metabolism, &FSMState)>().iter()
+    for (id, (pos, head, vision, _meta, fsm)) in sim
+        .world
+        .query::<(&Position, &Heading, &Vision, &Metabolism, &FSMState)>()
+        .iter()
     {
         let mut nearest: Option<(f64, Vector2<f64>)> = None;
         // 4.4: rain shrinks the predator-detection range like every other
         // vision path.
-        let detect_radius =
-            calibration::PREDATOR_DETECTION_RADIUS_M
-                * calibration::weather_vision_scale(
-                    sim.environment.weather,
-                    sim.environment.weather_intensity,
-                );
+        let detect_radius = calibration::PREDATOR_DETECTION_RADIUS_M
+            * calibration::weather_vision_scale(
+                sim.environment.weather,
+                sim.environment.weather_intensity,
+            );
         for ppos in &predators {
             let offset = *ppos - pos.0;
             let dist = offset.norm();
@@ -107,7 +108,10 @@ pub fn collect_threats(sim: &Simulation) -> FxHashMap<Entity, Vector2<f64>> {
 ///
 /// Applied to physics bodies BEFORE `physics.step` so the predator integrates
 /// with the same solver step as everyone else.
-pub fn plan_movement(sim: &mut Simulation, positions: &FxHashMap<Entity, Vector2<f64>>) -> Vec<(Entity, Vector2<f64>)> {
+pub fn plan_movement(
+    sim: &mut Simulation,
+    positions: &FxHashMap<Entity, Vector2<f64>>,
+) -> Vec<(Entity, Vector2<f64>)> {
     let dt = sim.config.dt;
     let max_level = calibration::PREDATOR_SPEED_LEVEL_MAX as f64;
     let min_level = calibration::PREDATOR_SPEED_LEVEL_MIN as f64;
@@ -134,11 +138,19 @@ pub fn plan_movement(sim: &mut Simulation, positions: &FxHashMap<Entity, Vector2
             continue;
         }
 
-        let mut nearest: Option<(f64, Vector2<f64>)> = None;
-        for (_aid, apos) in positions.iter() {
+        // Sprint 1 (Audit 5): candidates must have a stable tie-break BEFORE
+        // any RNG draw. Find the nearest agent, tie-breaking on entity id so
+        // the choice is collection-order independent and identical across runs.
+        let mut nearest: Option<(f64, Vector2<f64>, u64)> = None;
+        for (aid, apos) in positions.iter() {
             let d = (*apos - ppos).norm();
-            if nearest.map_or(true, |(b, _)| d < b) {
-                nearest = Some((d, *apos));
+            let bits = aid.to_bits().get();
+            let better = match nearest {
+                None => true,
+                Some((b, _, bbits)) => d < b - 1e-12 || ((d - b).abs() < 1e-12 && bits < bbits),
+            };
+            if better {
+                nearest = Some((d, *apos, bits));
             }
         }
 
@@ -147,11 +159,11 @@ pub fn plan_movement(sim: &mut Simulation, positions: &FxHashMap<Entity, Vector2
         // area — patrol toward the waypoint instead of re-engaging.
         let chasing = pred.capture_cooldown == 0;
         let linvel = match nearest {
-            Some((d, target)) if chasing && d <= calibration::PREDATOR_DETECTION_RADIUS_M => {
+            Some((d, target, _)) if chasing && d <= calibration::PREDATOR_DETECTION_RADIUS_M => {
                 // 6.2 Chase: ramp speed toward very-fast (5).
                 pred.hunt_state = PredatorHuntState::Chase;
-                let next = (pred.speed_level as f64)
-                    + calibration::PREDATOR_SPEED_RAMP_LEVELS_PER_S * dt;
+                let next =
+                    (pred.speed_level as f64) + calibration::PREDATOR_SPEED_RAMP_LEVELS_PER_S * dt;
                 pred.speed_level = next.min(max_level).round().max(min_level) as u8;
                 let speed = speed_for_level(pred.speed_level);
                 let dir = target - ppos;
@@ -164,16 +176,28 @@ pub fn plan_movement(sim: &mut Simulation, positions: &FxHashMap<Entity, Vector2
             _ => {
                 // 6.2 Await: patrol, speed decays toward slow (1).
                 pred.hunt_state = PredatorHuntState::Await;
-                let next = (pred.speed_level as f64)
-                    - calibration::PREDATOR_SPEED_DECAY_LEVELS_PER_S * dt;
+                let next =
+                    (pred.speed_level as f64) - calibration::PREDATOR_SPEED_DECAY_LEVELS_PER_S * dt;
                 pred.speed_level = next.max(min_level).round().min(max_level) as u8;
                 let speed = speed_for_level(pred.speed_level);
                 // Patrol mode: waypoint, re-randomize once reached. 4.3: sample
                 // obstacle-free points so the hawk never patrols INTO a building.
-                let target = pred.patrol_target.unwrap_or_else(|| random_patrol_target(&mut sim.rng, sim.config.world_width, sim.config.world_height, &sim.obstacles));
+                let target = pred.patrol_target.unwrap_or_else(|| {
+                    random_patrol_target(
+                        &mut sim.rng,
+                        sim.config.world_width,
+                        sim.config.world_height,
+                        &sim.obstacles,
+                    )
+                });
                 let dir = target - ppos;
                 if dir.norm() < 1.0 {
-                    new_patrol = Some(random_patrol_target(&mut sim.rng, sim.config.world_width, sim.config.world_height, &sim.obstacles));
+                    new_patrol = Some(random_patrol_target(
+                        &mut sim.rng,
+                        sim.config.world_width,
+                        sim.config.world_height,
+                        &sim.obstacles,
+                    ));
                 }
                 if dir.norm() > 1e-6 {
                     dir / dir.norm() * speed
@@ -182,6 +206,11 @@ pub fn plan_movement(sim: &mut Simulation, positions: &FxHashMap<Entity, Vector2
                 }
             }
         };
+        // Sprint 1 (Audit 5): persist the refreshed patrol waypoint — the old
+        // code computed `new_patrol` but never wrote it back into `pred`, so a
+        // predator that reached its waypoint kept patroling the SAME spot
+        // forever instead of ranging the map.
+        pred.patrol_target = new_patrol;
         updates.push((id, linvel, pred));
     }
 
@@ -201,19 +230,32 @@ pub fn plan_movement(sim: &mut Simulation, positions: &FxHashMap<Entity, Vector2
 /// 6.2: absolute speed for a speed level — linear from `PREDATOR_SPEED_MS/5`
 /// (slow, level 1) up to `PREDATOR_SPEED_MS` (very fast, level 5).
 fn speed_for_level(level: u8) -> f64 {
-    calibration::PREDATOR_SPEED_MS
-        * (level as f64)
-        / calibration::PREDATOR_SPEED_LEVEL_MAX as f64
+    calibration::PREDATOR_SPEED_MS * (level as f64) / calibration::PREDATOR_SPEED_LEVEL_MAX as f64
 }
 
-fn random_patrol_target(rng: &mut SimRng, w: f64, h: f64, obstacles: &[avian_core::components::Obstacle]) -> Vector2<f64> {
+fn random_patrol_target(
+    rng: &mut SimRng,
+    w: f64,
+    h: f64,
+    obstacles: &[avian_core::components::Obstacle],
+) -> Vector2<f64> {
+    // Sprint 2 (Audit 5): `random_free_point` now returns `Option`; an
+    // obstacle-covered arena falls back to the world center so the predator
+    // keeps a valid (non-collider) waypoint.
     avian_core::Simulation::random_free_point(w, h, obstacles, rng)
+        .unwrap_or_else(|| Vector2::new(w / 2.0, h / 2.0))
 }
 
 /// A patrol waypoint at least `PREDATOR_REPOSITION_MIN_DIST` away from `pos`,
 /// so a hawk that just struck sweeps into a NEW area instead of re-pinning the
 /// same cluster.
-fn far_random_point(rng: &mut SimRng, pos: Vector2<f64>, w: f64, h: f64, obstacles: &[avian_core::components::Obstacle]) -> Vector2<f64> {
+fn far_random_point(
+    rng: &mut SimRng,
+    pos: Vector2<f64>,
+    w: f64,
+    h: f64,
+    obstacles: &[avian_core::components::Obstacle],
+) -> Vector2<f64> {
     for _ in 0..16 {
         let p = random_patrol_target(rng, w, h, obstacles);
         if (p - pos).norm() >= calibration::PREDATOR_REPOSITION_MIN_DIST_M {
@@ -227,7 +269,10 @@ fn far_random_point(rng: &mut SimRng, pos: Vector2<f64>, w: f64, h: f64, obstacl
 /// agent pair within contact distance. Kills despawn the agent; misses give
 /// the predator a capture cooldown. Also decrements all predator cooldowns.
 /// Returns the stable UIDs of captured agents (3.2 reward attribution).
-pub fn resolve_contact(sim: &mut Simulation, positions: &FxHashMap<Entity, Vector2<f64>>) -> Vec<String> {
+pub fn resolve_contact(
+    sim: &mut Simulation,
+    positions: &FxHashMap<Entity, Vector2<f64>>,
+) -> Vec<String> {
     let preds: Vec<(Entity, Vector2<f64>, u32)> = sim
         .world
         .query::<(&Position, &Predator)>()
@@ -236,11 +281,17 @@ pub fn resolve_contact(sim: &mut Simulation, positions: &FxHashMap<Entity, Vecto
         .collect();
 
     let mut kills: Vec<Entity> = Vec::new();
+    // Sprint 1 (Audit 5): iterate contact candidates in a stable entity-id
+    // order so the RNG draw order (and therefore which agent a contact roll is
+    // made against) never depends on hash-map collection order.
+    let mut contact_order: Vec<(Entity, Vector2<f64>)> =
+        positions.iter().map(|(aid, apos)| (*aid, *apos)).collect();
+    contact_order.sort_by_key(|(aid, _)| aid.to_bits().get());
     for (pid, ppos, cooldown) in &preds {
         if *cooldown > 0 {
             continue;
         }
-        for (aid, apos) in positions.iter() {
+        for (aid, apos) in &contact_order {
             if kills.contains(aid) {
                 continue;
             }
@@ -252,7 +303,13 @@ pub fn resolve_contact(sim: &mut Simulation, positions: &FxHashMap<Entity, Vecto
                     // stop chasing while repositioning, so the predator RANGES
                     // the map instead of pinning one local cluster.
                     if let Ok(mut pr) = sim.world.get::<&mut Predator>(*pid) {
-                        pr.patrol_target = Some(far_random_point(&mut sim.rng, *ppos, sim.config.world_width, sim.config.world_height, &sim.obstacles));
+                        pr.patrol_target = Some(far_random_point(
+                            &mut sim.rng,
+                            *ppos,
+                            sim.config.world_width,
+                            sim.config.world_height,
+                            &sim.obstacles,
+                        ));
                         pr.capture_cooldown = calibration::PREDATOR_REPOSITION_COOLDOWN_FRAMES;
                         // 6.2: count the meal + enter the 1 s "busy" Catch beat.
                         pr.meals_eaten += 1;

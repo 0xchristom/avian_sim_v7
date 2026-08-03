@@ -1,5 +1,5 @@
 use nalgebra::Vector2;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Position(pub Vector2<f64>);
@@ -35,6 +35,11 @@ pub struct Metabolism {
     pub last_peck_time: f64,
 }
 
+/// Sprint 2 (Audit 5, B20): `repr(u8)` + `ALL` so metrics aggregate FSM by
+/// compact discriminant (index) instead of hashing a per-agent String. The
+/// serde unit-variant encoding is unchanged ("Foraging" etc.), so the viewer
+/// JSON is byte-for-byte identical to the old String fields.
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub enum FSMState {
     Idle,
@@ -51,6 +56,44 @@ pub enum FSMState {
     /// `GLIDE_MR_MULTIPLIER` and steering agility is restricted (bird rides the
     /// thermal in a straight-ish line instead of maneuvering).
     Gliding,
+    /// Audit 4 §9.5: night roosting — sleep in place (like Idle, but a
+    /// semantically distinct label). A fixed sentinel fraction of the flock
+    /// instead enters `Scanning` to stand guard.
+    Roosting,
+}
+
+impl FSMState {
+    /// Sprint 2 (Audit 5, B20/B18): stable lowercase discriminant used by the
+    /// snapshot/telemetry boundary — avoids `format!("{:?}")` allocation per
+    /// agent in the snapshot hot path. Values must match the Debug names so the
+    /// viewer keeps receiving the same labels as before.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FSMState::Idle => "Idle",
+            FSMState::Foraging => "Foraging",
+            FSMState::Fleeing => "Fleeing",
+            FSMState::Scanning => "Scanning",
+            FSMState::Spacer => "Spacer",
+            FSMState::Preening => "Preening",
+            FSMState::Sick => "Sick",
+            FSMState::Gliding => "Gliding",
+            FSMState::Roosting => "Roosting",
+        }
+    }
+
+    /// Sprint 2 (Audit 5, B20): all variants in discriminant order, so metrics
+    /// can aggregate into a fixed-size array without per-agent String hashing.
+    pub const ALL: [FSMState; 9] = [
+        FSMState::Idle,
+        FSMState::Foraging,
+        FSMState::Fleeing,
+        FSMState::Scanning,
+        FSMState::Spacer,
+        FSMState::Preening,
+        FSMState::Sick,
+        FSMState::Gliding,
+        FSMState::Roosting,
+    ];
 }
 
 /// 2.6 feather condition 0..=1 (1 = pristine). Decays with rain/mud, restored
@@ -111,6 +154,19 @@ pub enum Weather {
     Heat,
 }
 
+impl Weather {
+    /// Sprint 2 (Audit 5, B20): stable label without a per-snapshot
+    /// `format!("{:?}")` allocation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Weather::Clear => "Clear",
+            Weather::Rain => "Rain",
+            Weather::Wind => "Wind",
+            Weather::Heat => "Heat",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct EnvironmentState {
     pub time_of_day_hours: f64,
@@ -162,6 +218,18 @@ pub enum PredatorHuntState {
     Chase,
     /// Just struck (capture or miss) — halted "busy" for `PREDATOR_CATCH_BUSY_S`.
     Catch,
+}
+
+impl PredatorHuntState {
+    /// Sprint 2 (Audit 5, B20): stable label without a per-snapshot
+    /// `format!("{:?}")` allocation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PredatorHuntState::Await => "Await",
+            PredatorHuntState::Chase => "Chase",
+            PredatorHuntState::Catch => "Catch",
+        }
+    }
 }
 
 /// 2.2 predator entity — a bespoke pursuit script, NOT a BTNode.

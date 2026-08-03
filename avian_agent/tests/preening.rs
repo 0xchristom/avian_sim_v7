@@ -2,10 +2,10 @@
 //! restore their feathers; over a long run the FSM histogram shows a
 //! preening share near the ~10% pigeon time budget.
 
-use avian_core::{Simulation, SimulationConfig};
-use avian_core::components::{FSMState, FeatherCondition, Age};
-use avian_agent::systems::run_systems;
 use avian_agent::gerontology::spawn_agent;
+use avian_agent::systems::run_systems;
+use avian_core::components::{Age, FSMState, FeatherCondition};
+use avian_core::{Simulation, SimulationConfig};
 use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 
@@ -36,7 +36,10 @@ fn test_low_feathers_triggers_preening_and_restores() {
 
     assert!(saw_preening, "low-feather agent never entered Preening");
     let restored = sim.world.get::<&FeatherCondition>(e).unwrap().0;
-    assert!(restored > 0.3, "preening did not restore feathers (now {restored:.2})");
+    assert!(
+        restored > 0.3,
+        "preening did not restore feathers (now {restored:.2})"
+    );
 }
 
 #[test]
@@ -46,7 +49,13 @@ fn test_preening_time_budget_share() {
         let x = sim.rng.gen_range(2.0..30.0);
         let y = sim.rng.gen_range(2.0..19.0);
         let uid = sim.next_uid_str();
-        let e = spawn_agent(&mut sim.world, &mut sim.rng, Vector2::new(x, y), &mut sim.physics, uid);
+        let e = spawn_agent(
+            &mut sim.world,
+            &mut sim.rng,
+            Vector2::new(x, y),
+            &mut sim.physics,
+            uid,
+        );
         // Force young (vitality ~0.84) so the 2.7 Sick branch can't starve the
         // preening duty cycle and skew the share below the band.
         sim.world.get::<&mut Age>(e).unwrap().years = 1.0;

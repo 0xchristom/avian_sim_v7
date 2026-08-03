@@ -82,6 +82,13 @@ pub const VISION_MAX_RANGE_M: f64 = 10.0;
 /// 28×17 free area) this succeeds on the first or second try almost always.
 pub const MAX_FREE_POINT_TRIES: u32 = 32;
 
+/// Sprint 2 (Audit 5, B10): a velocity change below this magnitude (m/s) is
+/// "not material" — the physics hot loop skips `set_linvel` (and the wake-up
+/// it implies) so sleeping/idle bodies are not force-woken every tick. 1 cm/s
+/// is far below the slowest agent speed (~2 m/s walking) while still small
+/// enough that a genuinely moving body always crosses it.
+pub const BODY_VELOCITY_WAKE_EPS: f32 = 0.01;
+
 /// 4.3: line-of-sight tolerance (fraction of the cast). A static hit at
 /// toi >= 1 - EPS means the target itself is touching the obstacle boundary,
 /// not that an obstacle blocks the sight line.
@@ -154,6 +161,13 @@ pub const MAX_ENERGY_KJ: f64 = 60.0;
 pub const NIGHT_REST_LIGHT_THRESHOLD: f64 = 0.3;
 /// Night energy-drain multiplier (2.3) — drain reduced to 30% of day rate.
 pub const NIGHT_DRAIN_FACTOR: f64 = 0.3;
+/// Audit 4 §9.5: fraction of night-eligible birds that stay in `Scanning` as
+/// flock sentinels instead of `Roosting`. Drawn per-tick from `sim.rng` so the
+/// same birds are never sentinels every night.
+pub const SENTINEL_FRACTION: f64 = 0.12;
+/// Audit 4 §9.5: sentinel patrol speed as a fraction of `max_speed_ms` (slow,
+/// alert shuffle while the rest of the flock sleeps).
+pub const SENTINEL_PATROL_SPEED_FRACTION: f64 = 0.3;
 /// Length of a full day/night cycle in sim-seconds (2.3).
 pub const DAY_LENGTH_SIM_S: f64 = 600.0;
 
@@ -246,6 +260,16 @@ pub const BOID_COHESION_WEIGHT: f64 = 0.5;
 pub const BOID_SEPARATION_RADIUS_M: f64 = 0.5;
 /// Local flock neighborhood radius (m).
 pub const BOID_NEIGHBOR_RADIUS_M: f64 = 3.0;
+
+/// Audit 4 §9.8: maximum Lévy "relocate" step (m) for the Wander spacer. The
+/// raw `levy_step` tail is heavy (P(step > s) ≈ s^-2), but the call sites cap
+/// it — the old hardcoded 5 m cap meant a wanderer could never escape a
+/// cluster's gravity well (neighbor radius 3 m + cohesion pull). 15 m ≈ half
+/// the arena width: rare, genuinely arena-crossing excursions that let an
+/// individual search away from the group. The flightless step is still walked
+/// at Wander speed (~0.8×), so a 15 m step is a ~15 s directional excursion,
+/// never a teleport.
+pub const WANDER_LEVY_MAX_STEP_M: f64 = 15.0;
 
 /// Audit 3 (Phase 2) — targeted caching thresholds. All frame-based, so
 /// determinism (7.1) is preserved: caches are keyed by hecs entity (generation
@@ -391,6 +415,9 @@ pub fn calibration_export_json() -> serde_json::Value {
         "max_energy_kj": MAX_ENERGY_KJ,
         "night_rest_light_threshold": NIGHT_REST_LIGHT_THRESHOLD,
         "night_drain_factor": NIGHT_DRAIN_FACTOR,
+        "sentinel_fraction": SENTINEL_FRACTION,
+        "sentinel_patrol_speed_fraction": SENTINEL_PATROL_SPEED_FRACTION,
+        "wander_levy_max_step_m": WANDER_LEVY_MAX_STEP_M,
         "day_length_sim_s": DAY_LENGTH_SIM_S,
         "preen_feather_threshold": PREEN_FEATHER_THRESHOLD,
         "preen_stop_threshold": PREEN_STOP_THRESHOLD,
@@ -450,33 +477,64 @@ mod tests {
 
     #[test]
     fn test_mass_curve_range() {
-        assert!(ADULT_MASS_G >= 300.0 && ADULT_MASS_G <= 350.0, "adult mass out of range");
-        assert!(HATCHLING_MASS_G < FLEDGLING_MASS_G, "hatchling must be lightest");
-        assert!(FLEDGLING_MASS_G < ADULT_MASS_G, "fledgling must be lighter than adult");
+        assert!(
+            ADULT_MASS_G >= 300.0 && ADULT_MASS_G <= 350.0,
+            "adult mass out of range"
+        );
+        assert!(
+            HATCHLING_MASS_G < FLEDGLING_MASS_G,
+            "hatchling must be lightest"
+        );
+        assert!(
+            FLEDGLING_MASS_G < ADULT_MASS_G,
+            "fledgling must be lighter than adult"
+        );
     }
 
     #[test]
     fn test_bmr_range() {
-        assert!(ADULT_BMR_WATTS >= 3.5 && ADULT_BMR_WATTS <= 4.5, "BMR out of literature range");
+        assert!(
+            ADULT_BMR_WATTS >= 3.5 && ADULT_BMR_WATTS <= 4.5,
+            "BMR out of literature range"
+        );
         assert!((bmr_for_mass(ADULT_MASS_G) - ADULT_BMR_WATTS).abs() < 1e-9);
         assert!(bmr_for_mass(0.0) > 0.0, "BMR must never be zero");
     }
 
     #[test]
     fn test_speed_range() {
-        assert!(WALK_SPEED_MS >= 0.5 && WALK_SPEED_MS <= 1.5, "walk speed out of range");
-        assert!(FLY_SPEED_MS >= 10.0 && FLY_SPEED_MS <= 20.0, "flight speed out of range");
+        assert!(
+            WALK_SPEED_MS >= 0.5 && WALK_SPEED_MS <= 1.5,
+            "walk speed out of range"
+        );
+        assert!(
+            FLY_SPEED_MS >= 10.0 && FLY_SPEED_MS <= 20.0,
+            "flight speed out of range"
+        );
         assert!(WALK_SPEED_MS < FLY_SPEED_MS);
-        assert!(FLIGHT_MR_MULTIPLIER > 1.0, "flight must cost more than rest");
-        assert!(FLIGHT_MR_MULTIPLIER >= 5.0 && FLIGHT_MR_MULTIPLIER <= 9.0, "flight MR 6-8x literature");
+        assert!(
+            FLIGHT_MR_MULTIPLIER > 1.0,
+            "flight must cost more than rest"
+        );
+        assert!(
+            FLIGHT_MR_MULTIPLIER >= 5.0 && FLIGHT_MR_MULTIPLIER <= 9.0,
+            "flight MR 6-8x literature"
+        );
         // Flight threshold between walk and half-sick-flee (7.5) so a fleeing
         // pigeon — healthy (15) or sick (7.5) — always pays the flight cost.
         assert!(FLIGHT_SPEED_THRESHOLD_MS < FLY_SPEED_MS * 0.5);
         assert!(FLIGHT_SPEED_THRESHOLD_MS > WALK_SPEED_MS);
-        assert_eq!(flight_mr_multiplier(WALK_SPEED_MS), 1.0, "walking must not pay flight cost");
+        assert_eq!(
+            flight_mr_multiplier(WALK_SPEED_MS),
+            1.0,
+            "walking must not pay flight cost"
+        );
         assert_eq!(flight_mr_multiplier(FLY_SPEED_MS), FLIGHT_MR_MULTIPLIER);
-        assert_eq!(flight_mr_multiplier(FLY_SPEED_MS * 0.5), FLIGHT_MR_MULTIPLIER,
-            "sick half-speed flee still counts as flying");
+        assert_eq!(
+            flight_mr_multiplier(FLY_SPEED_MS * 0.5),
+            FLIGHT_MR_MULTIPLIER,
+            "sick half-speed flee still counts as flying"
+        );
     }
 
     #[test]
@@ -496,7 +554,10 @@ mod tests {
 
     #[test]
     fn test_vitality_at_birth_is_one() {
-        assert!((vitality_at(0.0) - 1.0).abs() < 1e-9, "vitality must be 1.0 at birth");
+        assert!(
+            (vitality_at(0.0) - 1.0).abs() < 1e-9,
+            "vitality must be 1.0 at birth"
+        );
     }
 
     #[test]
@@ -504,7 +565,11 @@ mod tests {
         let mut prev = vitality_at(0.0);
         for t in 1..=20 {
             let v = vitality_at(t as f64);
-            assert!(v <= prev + 1e-12, "vitality must be non-increasing at t={}", t);
+            assert!(
+                v <= prev + 1e-12,
+                "vitality must be non-increasing at t={}",
+                t
+            );
             prev = v;
         }
     }
@@ -569,9 +634,14 @@ mod tests {
         assert!((weather_vision_scale(Weather::Clear, 1.0) - 1.0).abs() < 1e-12);
         assert!((weather_vision_scale(Weather::Rain, 0.0) - 1.0).abs() < 1e-12);
         assert!((weather_vision_scale(Weather::Rain, 1.0) - RAIN_VISIBILITY_FACTOR).abs() < 1e-12);
-        assert!((weather_metabolic_multiplier(Weather::Heat, 1.0) - HEAT_BMR_MULTIPLIER).abs() < 1e-12);
+        assert!(
+            (weather_metabolic_multiplier(Weather::Heat, 1.0) - HEAT_BMR_MULTIPLIER).abs() < 1e-12
+        );
         assert!((weather_metabolic_multiplier(Weather::Clear, 1.0) - 1.0).abs() < 1e-12);
-        assert!((weather_wind_flight_multiplier(Weather::Wind, 1.0) - WIND_FLIGHT_MR_MULTIPLIER).abs() < 1e-12);
+        assert!(
+            (weather_wind_flight_multiplier(Weather::Wind, 1.0) - WIND_FLIGHT_MR_MULTIPLIER).abs()
+                < 1e-12
+        );
         assert!((weather_wind_flight_multiplier(Weather::Wind, 0.0) - 1.0).abs() < 1e-12);
     }
 
@@ -587,7 +657,8 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../analysis/calibration_export.json"
         );
-        let committed = std::fs::read_to_string(path).expect("analysis/calibration_export.json missing — regenerate it");
+        let committed = std::fs::read_to_string(path)
+            .expect("analysis/calibration_export.json missing — regenerate it");
         let committed_json: serde_json::Value =
             serde_json::from_str(&committed).expect("committed export is not valid JSON");
         assert_eq!(

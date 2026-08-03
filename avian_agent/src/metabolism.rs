@@ -1,7 +1,7 @@
-use hecs::World;
-use avian_core::time::SimulationTime;
-use avian_core::components::*;
 use avian_core::calibration;
+use avian_core::components::*;
+use avian_core::time::SimulationTime;
+use hecs::World;
 
 pub fn metabolism_system(
     world: &mut World,
@@ -22,7 +22,10 @@ pub fn metabolism_system(
         1.0
     };
 
-    for (_id, (meta, vel, mass, fsm)) in world.query::<(&mut Metabolism, &Velocity, &Mass, &FSMState)>().iter() {
+    for (_id, (meta, vel, mass, fsm)) in world
+        .query::<(&mut Metabolism, &Velocity, &Mass, &FSMState)>()
+        .iter()
+    {
         let mass_kg = mass.current_g / 1000.0;
         let v_mag = vel.0.norm();
 
@@ -58,7 +61,7 @@ pub fn metabolism_system(
             let to_transfer = (transfer_rate as u32).min(meta.crop_count);
             meta.crop_count -= to_transfer;
             meta.gizzard_count += to_transfer;
-            
+
             let energy_from_food = to_transfer as f64 * 0.5;
             let tef_loss = 0.1 * energy_from_food;
             meta.energy_kj += energy_from_food - tef_loss;
@@ -71,7 +74,7 @@ pub fn metabolism_system(
         } else {
             0.0
         };
-        
+
         meta.hunger = 0.6 * (1.0 - crop_ratio).clamp(0.0, 1.0)
             + 0.4 * (1.0 - blood_glucose / 5.0).clamp(0.0, 1.0);
         meta.hunger = meta.hunger.clamp(0.0, 1.0);

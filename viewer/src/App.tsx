@@ -27,11 +27,19 @@ const App: React.FC = () => {
   const [speed, setSpeed] = useState(1);
   // 6.4: live connection status (reconnect-with-backoff) + client-side FPS.
   const [connected, setConnected] = useState(false);
-  const [fps, setFps] = useState(0);
-  const fpsRef = useRef({ frames: 0, last: performance.now() });
+  // Audit 4 §9.2: two distinct numbers — `paintFps` is the real rAF frame rate
+  // (what the user perceives), `recvFps` counts WS snapshot arrivals. The
+  // primary "fps" label now reflects paint performance, since a slow client
+  // can still receive 60 snapshots/s while visibly stuttering.
+  const [paintFps, setPaintFps] = useState(0);
+  const [recvFps, setRecvFps] = useState(0);
+  const recvFpsRef = useRef({ frames: 0, last: performance.now() });
   const reconnectDelayRef = useRef(1000);
   // Audit 2 Task 2: flock/neighbor connection line visibility (default on).
   const [neighborLinesVisible, setNeighborLinesVisible] = useState(true);
+  // Sprint 5 (background task item 4): mobile — the sidebar is an overlay
+  // drawer on narrow screens; this toggles it open/closed.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   useEffect(() => {
     if (canvasRef.current) { rendererRef.current = new WebGLRenderer(canvasRef.current); }
@@ -57,23 +65,28 @@ const App: React.FC = () => {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data && data.type === 'event_log') {
-            // 6.1: scenario event log (frame + injected events), separate from snapshots.
-            appendEvents(data.frame, data.events);
-          } else if (data && data.type === 'metrics') {
-            // 6.2: dashboard metrics (every ~100 frames), separate from snapshots.
-            setMetrics(data.metrics);
-          } else if (data && data.agents) {
-            setSnapshot(data);
-            // 6.4: client-side FPS = snapshot frames received per second.
+          // Audit 4 §9.6: the server sends ONE coalesced message per broadcast
+          // tick — `{ snapshot?, event_log?, metrics? }` — instead of up to 3
+          // separate `type`-keyed messages. Handle each field independently.
+          if (data && data.snapshot) {
+            setSnapshot(data.snapshot);
+            // Audit 4 §9.2: recv fps = snapshot frames received per second.
             const now = performance.now();
-            const f = fpsRef.current;
+            const f = recvFpsRef.current;
             f.frames += 1;
             if (now - f.last >= 500) {
-              setFps(Math.round((f.frames * 1000) / (now - f.last)));
+              setRecvFps(Math.round((f.frames * 1000) / (now - f.last)));
               f.frames = 0;
               f.last = now;
             }
+          }
+          if (data && data.event_log) {
+            // 6.1: scenario event log (frame + injected events).
+            appendEvents(data.event_log.frame, data.event_log.events);
+          }
+          if (data && data.metrics) {
+            // 6.2: dashboard metrics (every ~100 frames).
+            setMetrics(data.metrics);
           }
         } catch (e) {}
       };
@@ -97,6 +110,8 @@ const App: React.FC = () => {
 
   useEffect(() => {
     let raf = 0;
+    // Audit 4 §9.3: requestAnimationFrame is vsync-limited (~60 fps max) —
+    // this is the browser-side 60fps cap. Do NOT replace with setInterval.
     const loop = () => {
       const r = rendererRef.current;
       if (r) {
@@ -110,6 +125,8 @@ const App: React.FC = () => {
             selectedUidsRef.current,
             hoveredUidRef.current || undefined,
           );
+          // Audit 4 §9.2: primary fps label = actual paint rate (rAF clock).
+          setPaintFps(r.paintFps());
         }
       }
       raf = requestAnimationFrame(loop);
@@ -311,14 +328,25 @@ const App: React.FC = () => {
   });
 
   return (
-    <div style={{ display: 'flex', width: '100vw', height: '100vh', backgroundColor: '#0a0b10', color: '#d4d4d4', fontFamily: 'Courier New' }}>
-      <div className="sidebar" style={{ width: '340px', height: '100vh', overflowY: 'auto', background: '#14161f', borderRight: '2px solid #ff6c0c', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
+    <div className="app-root" style={{ display: 'flex', width: '100vw', height: '100vh', backgroundColor: 'transparent', color: '#d4d4d4', fontFamily: 'Courier New' }}>
+      {/* Sprint 5 (background task item 4): mobile hamburger to open the
+          sidebar drawer (hidden on desktop via CSS). */}
+      <button
+        className="sidebar-toggle"
+        onClick={() => setSidebarOpen(o => !o)}
+        title="Toggle panel"
+        aria-label="Toggle panel"
+      >
+        {sidebarOpen ? '✕' : '☰'}
+      </button>
+      <div className={`sidebar${sidebarOpen ? ' open' : ''}`} style={{ width: '340px', height: '100vh', overflowY: 'auto', background: '#14161f', borderRight: '2px solid #ff6c0c', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
         <div style={{ padding: '12px 15px', borderBottom: '2px solid #ff6c0c', textAlign: 'center' }}>
           <h2 style={{ margin: 0, color: '#ff6c0c', fontSize: '16px' }}>AVIAN SIM v7.0 PRO</h2>
           {/* 6.4: live status bar — connection + fps + sim time + agent/grain counts. */}
           <div style={{ margin: '6px 0 0 0', fontSize: '11px', display: 'flex', justifyContent: 'center', gap: '10px', color: '#888' }}>
             <span style={{ color: connected ? '#00ffcc' : '#ff3366' }}>{connected ? '● CONNECTED' : '○ DISCONNECTED'}</span>
-            <span>{fps} fps</span>
+            <span>{paintFps} fps paint</span>
+            <span>{recvFps} recv/s</span>
             <span>#{snapshot?.frame ?? 0}</span>
             <span>{snapshot ? formatTime(snapshot.time_us) : "00:00"}</span>
             <span>{snapshot?.agents.length ?? 0} birds</span>

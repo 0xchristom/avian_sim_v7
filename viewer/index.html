@@ -10,7 +10,34 @@
             --accent: #00ffcc; --danger: #ff3366; --orange: #ff6c0c; 
             --btn-bg: #2a2f3a; --btn-hover: #3a4150;
         }
-        body { margin: 0; background: var(--bg); color: var(--text); font-family: 'Courier New', monospace; display: flex; height: 100vh; overflow: hidden; }
+        /* Sprint 5 (background task): the app background is the repo-owned
+           asset copied from `D:\Gemini\golebie\visuals\background no fireflies.jpg`
+           → `viewer/public/assets/background-no-fireflies.jpg`. The build only
+           references the relative `/assets/...` URL, never the source path. */
+        body {
+            margin: 0;
+            background-color: var(--bg);
+            background-image: url('/assets/background-no-fireflies.jpg');
+            background-size: cover;
+            background-position: center;
+            background-attachment: fixed;
+            color: var(--text);
+            font-family: 'Courier New', monospace;
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+        /* Semi-transparent overlay keeps text and the WebGL canvas readable
+           over the photo background (Sprint 5 background task item 3). Painted
+           above the image but below the app content. */
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background: rgba(10, 11, 16, 0.72);
+            z-index: -1;
+            pointer-events: none;
+        }
         
         .sidebar { 
             width: 340px; background: var(--panel); border-right: 2px solid var(--orange); 
@@ -51,6 +78,49 @@
         
         .canvas-area { flex: 1; display: flex; justify-content: center; align-items: center; padding: 20px; }
         canvas { background: #1a1c25; border: 1px solid #333; box-shadow: 0 0 20px rgba(0,255,204,0.1); cursor: crosshair; max-width: 100%; max-height: 100%; }
+
+        /* Sprint 5 (background task item 4): mobile. On narrow screens the
+           sidebar becomes an overlay drawer (toggled by a hamburger button in
+           the canvas corner) and the canvas reflows to the viewport — the app
+           never horizontally scrolls. */
+        .sidebar-toggle { display: none; }
+        @media (max-width: 768px) {
+            body { overflow: hidden; }
+            .app-root { flex-direction: column; overflow: hidden; }
+            .sidebar {
+                position: fixed;
+                top: 0;
+                left: 0;
+                bottom: 0;
+                z-index: 200;
+                transform: translateX(-105%);
+                transition: transform 0.22s ease;
+                box-shadow: 0 0 24px rgba(0,0,0,0.6);
+                border-right: 2px solid var(--orange);
+            }
+            .sidebar.open { transform: translateX(0); }
+            .sidebar-toggle {
+                display: flex;
+                position: fixed;
+                top: 10px;
+                left: 10px;
+                z-index: 210;
+                background: var(--panel);
+                color: var(--orange);
+                border: 1px solid var(--orange);
+                border-radius: 4px;
+                width: 38px;
+                height: 38px;
+                align-items: center;
+                justify-content: center;
+                font-size: 18px;
+                cursor: pointer;
+            }
+            .canvas-area { padding: 8px; }
+            main { padding: 8px !important; }
+            canvas { max-width: 100%; max-height: 100%; }
+            #root { overflow: hidden; }
+        }
     </style>
 </head>
 <body>

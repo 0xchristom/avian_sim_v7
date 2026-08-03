@@ -30,11 +30,11 @@
 //! byte-identical test. (5.4 implementation is DEFERRED — no >30-agent headless
 //! generation need yet; only this design landed, in Sprint 0.)
 
-use rand_chacha::ChaCha8Rng;
-use rand::{Rng, RngCore, SeedableRng};
-use rand::distributions::{Distribution, Standard};
 use rand::distributions::uniform::SampleRange;
-use serde::{Serialize, Deserialize};
+use rand::distributions::{Distribution, Standard};
+use rand::{Rng, RngCore, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SimRng(ChaCha8Rng);
@@ -68,9 +68,15 @@ impl SimRng {
 }
 
 impl RngCore for SimRng {
-    fn next_u32(&mut self) -> u32 { self.0.next_u32() }
-    fn next_u64(&mut self) -> u64 { self.0.next_u64() }
-    fn fill_bytes(&mut self, dest: &mut [u8]) { self.0.fill_bytes(dest) }
+    fn next_u32(&mut self) -> u32 {
+        self.0.next_u32()
+    }
+    fn next_u64(&mut self) -> u64 {
+        self.0.next_u64()
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.0.fill_bytes(dest)
+    }
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
         self.0.try_fill_bytes(dest)
     }

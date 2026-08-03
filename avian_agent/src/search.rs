@@ -1,5 +1,5 @@
-use rand_distr::{Distribution, Normal};
 use avian_core::rng::SimRng;
+use rand_distr::{Distribution, Normal};
 
 pub enum SearchMode {
     Brownian,

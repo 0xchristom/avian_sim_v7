@@ -13,9 +13,9 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use avian_core::{Simulation, SimulationConfig};
 use avian_agent::gerontology::spawn_agent;
 use avian_agent::systems::run_systems;
+use avian_core::{Simulation, SimulationConfig};
 use avian_telemetry::exporter::TelemetryExporter;
 
 static ALLOCS: AtomicI64 = AtomicI64::new(0);
@@ -122,9 +122,7 @@ fn test_zero_heap_overhead_with_telemetry_disabled() {
     let (e1, _) = counters();
     let enabled_churn = e1 - e0;
     let enabled_per_frame = enabled_churn as f64 / MEASURE as f64;
-    println!(
-        "[enabled ] alloc_churn={enabled_churn} per_frame={enabled_per_frame:.2}"
-    );
+    println!("[enabled ] alloc_churn={enabled_churn} per_frame={enabled_per_frame:.2}");
     assert!(
         alloc_churn < enabled_churn,
         "disabled path must allocate less than enabled path \

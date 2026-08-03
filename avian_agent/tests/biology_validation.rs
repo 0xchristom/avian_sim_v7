@@ -18,12 +18,12 @@
 //! NOTE: 7.2 "foraging efficiency improves with spatial memory" requires 4.2
 //! (memory-biased search, Sprint 5) and is added there.
 
-use avian_core::{Simulation, SimulationConfig};
+use avian_agent::gerontology::sample_age;
+use avian_agent::systems::{run_systems, spawn_grain};
 use avian_core::calibration;
 use avian_core::components::{Age, FSMState, Grain, MemorySlot, MemorySlots, Metabolism, Position};
 use avian_core::rng::SimRng;
-use avian_agent::gerontology::sample_age;
-use avian_agent::systems::{run_systems, spawn_grain};
+use avian_core::{Simulation, SimulationConfig};
 use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 use std::collections::HashMap;
@@ -170,8 +170,7 @@ fn energy_balance_is_conserved_over_run() {
 
     // Digestion inflow is folded into the intake counter inside run_systems,
     // so `intake` already includes it.
-    let expected_delta =
-        stats.intake + stats.spawn_inflow - stats.expenditure - stats.lost;
+    let expected_delta = stats.intake + stats.spawn_inflow - stats.expenditure - stats.lost;
     let actual_delta = stats.end_pool - stats.start_pool;
 
     let scale = 1.0 + stats.intake.abs() + stats.expenditure.abs();
@@ -256,14 +255,20 @@ fn fsm_time_budget_within_literature_bands() {
     // foraging/resting budgets by <0.5%, so the resting cap / foraging floor
     // get a little slack; the intent (agents actually forage, never all-rest)
     // is unchanged.
+    // Audit 4 §9.8: foraging cohesion is now ZERO (a foraging bird is pulled
+    // by separation only, never toward the flock centroid), which makes birds
+    // search independently and deterministically drops the measured foraging
+    // budget from ~5.5% to ~4.0%. The floor is loosened to 3% to keep the
+    // original intent (agents actually forage, never all-rest) while
+    // acknowledging the deliberate shift toward individual exploration.
     assert!(
         (0.20..=0.90).contains(&resting),
         "resting time budget {:.1}% outside [20%, 90%]",
         resting * 100.0
     );
     assert!(
-        (0.04..=0.60).contains(&foraging),
-        "foraging time budget {:.1}% outside [4%, 60%]",
+        (0.03..=0.60).contains(&foraging),
+        "foraging time budget {:.1}% outside [3%, 60%]",
         foraging * 100.0
     );
     assert!(

@@ -18,13 +18,13 @@ use crate::rng::SimRng;
 use crate::time::SimulationTime;
 use crate::SimulationConfig;
 use avian_physics::PhysicsState;
-use hecs::World;
 use hecs::serialize::column::{
-    try_serialize, try_serialize_id, deserialize_column, DeserializeContext, SerializeContext,
+    deserialize_column, try_serialize, try_serialize_id, DeserializeContext, SerializeContext,
 };
+use hecs::World;
 use hecs::{ColumnBatchBuilder, ColumnBatchType};
 use rustc_hash::FxHashMap;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// One variant per component type registered in the world. Adding a new
 /// component type to `spawn_agent`/`spawn_predator`/`spawn_grain_entity` MUST
@@ -156,10 +156,7 @@ impl SerializeContext for WorldContext {
 }
 
 impl DeserializeContext for WorldContext {
-    fn deserialize_component_ids<'de, A>(
-        &mut self,
-        mut seq: A,
-    ) -> Result<ColumnBatchType, A::Error>
+    fn deserialize_component_ids<'de, A>(&mut self, mut seq: A) -> Result<ColumnBatchType, A::Error>
     where
         A: serde::de::SeqAccess<'de>,
     {
@@ -350,7 +347,12 @@ pub fn build_checkpoint(sim: &crate::Simulation) -> Result<Checkpoint, Box<dyn s
     // Audit 3 (Phase 2): encode the transient caches with entity ordinals so
     // they survive the entity renumbering that column deserialization does.
     let mut agent_ord: FxHashMap<hecs::Entity, usize> = FxHashMap::default();
-    for (i, (e, _)) in sim.world.query::<(&AgentUid, &Metabolism)>().iter().enumerate() {
+    for (i, (e, _)) in sim
+        .world
+        .query::<(&AgentUid, &Metabolism)>()
+        .iter()
+        .enumerate()
+    {
         agent_ord.insert(e, i);
     }
     let mut grain_ord: FxHashMap<hecs::Entity, usize> = FxHashMap::default();

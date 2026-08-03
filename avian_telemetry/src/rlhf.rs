@@ -171,7 +171,7 @@ mod tests {
             age_years: 2.0,
             energy_kj: 30.0,
             hunger: 0.5,
-            fsm_state: "Foraging".into(),
+            fsm_state: avian_core::components::FSMState::Foraging,
             head_offset: [0.0, 0.0],
             alarm_triggered: false,
             sick: false,

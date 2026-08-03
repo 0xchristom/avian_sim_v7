@@ -9,10 +9,10 @@
 //! 4. The glide MR multiplier is near-zero vs active flight (unit-level).
 //! 5. Gliding actually drains less energy than ground locomotion.
 
-use avian_core::{Simulation, SimulationConfig};
-use avian_core::calibration;
-use avian_core::components::{Age, FSMState, FeatherCondition, Position, Velocity, Heading};
 use avian_agent::systems::run_systems;
+use avian_core::calibration;
+use avian_core::components::{Age, FSMState, FeatherCondition, Heading, Position, Velocity};
+use avian_core::{Simulation, SimulationConfig};
 use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 
@@ -23,11 +23,7 @@ fn urban_sim(seed: u64) -> Simulation {
     Simulation::new(seed, config)
 }
 
-fn spawn_controlled_agent(
-    sim: &mut Simulation,
-    pos: Vector2<f64>,
-    heading: f64,
-) -> hecs::Entity {
+fn spawn_controlled_agent(sim: &mut Simulation, pos: Vector2<f64>, heading: f64) -> hecs::Entity {
     let uid = sim.next_uid_str();
     let e = avian_agent::gerontology::spawn_agent(
         &mut sim.world,
@@ -56,7 +52,9 @@ fn thermal_zones_form_on_sun_facing_building_sides() {
 
     // Noon (12h): sun_heading = -(12-6)/12·π = -π/2 → sun from the SOUTH.
     // Building A's south face (y=3) must host the updraft strip.
-    sim.step(|s, _dt| { let _ = s; });
+    sim.step(|s, _dt| {
+        let _ = s;
+    });
     sim.update_thermals();
     assert_eq!(sim.thermals.len(), 2, "two buildings → two thermal zones");
     let (amin, amax) = BUILDING_A;
@@ -66,8 +64,15 @@ fn thermal_zones_form_on_sun_facing_building_sides() {
             && (t.min.x - amin[0]).abs() < 1e-9
             && (t.max.x - amax[0]).abs() < 1e-9
     });
-    assert!(south.is_some(), "noon: thermal must be on the SOUTH face of building A");
-    assert_eq!(south.unwrap().flow, Vector2::new(-1.0, 0.0), "south-face updraft flows -x");
+    assert!(
+        south.is_some(),
+        "noon: thermal must be on the SOUTH face of building A"
+    );
+    assert_eq!(
+        south.unwrap().flow,
+        Vector2::new(-1.0, 0.0),
+        "south-face updraft flows -x"
+    );
 
     // Sunrise (6h): sun_heading = 0 → sun from the EAST → EAST face hosts it.
     sim.environment.time_of_day_hours = 6.0;
@@ -79,8 +84,15 @@ fn thermal_zones_form_on_sun_facing_building_sides() {
             && (t.min.y - amin[1]).abs() < 1e-9
             && (t.max.y - amax[1]).abs() < 1e-9
     });
-    assert!(east.is_some(), "sunrise: thermal must be on the EAST face of building A");
-    assert_eq!(east.unwrap().flow, Vector2::new(0.0, 1.0), "east-face updraft rises +y");
+    assert!(
+        east.is_some(),
+        "sunrise: thermal must be on the EAST face of building A"
+    );
+    assert_eq!(
+        east.unwrap().flow,
+        Vector2::new(0.0, 1.0),
+        "east-face updraft rises +y"
+    );
 }
 
 #[test]
@@ -96,7 +108,11 @@ fn glide_state_entered_in_aligned_thermal() {
 
     sim.step(|s, dt| run_systems(s, dt, &mut exporter));
     let fsm = *sim.world.get::<&FSMState>(e).unwrap();
-    assert_eq!(fsm, FSMState::Gliding, "aligned bird in thermal must enter Gliding");
+    assert_eq!(
+        fsm,
+        FSMState::Gliding,
+        "aligned bird in thermal must enter Gliding"
+    );
 
     // It must also be genuinely airborne (glide cruise speed).
     let v = sim.world.get::<&Velocity>(e).unwrap().0;
@@ -120,7 +136,11 @@ fn no_glide_outside_thermal() {
     for _ in 0..100 {
         sim.step(|s, dt| run_systems(s, dt, &mut exporter));
         let fsm = *sim.world.get::<&FSMState>(e).unwrap();
-        assert_ne!(fsm, FSMState::Gliding, "bird outside any thermal must not glide");
+        assert_ne!(
+            fsm,
+            FSMState::Gliding,
+            "bird outside any thermal must not glide"
+        );
     }
 }
 

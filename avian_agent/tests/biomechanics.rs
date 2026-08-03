@@ -15,7 +15,7 @@ fn test_mass_scales_with_age() {
     let mass_juvenile = 250.0 + (0.5 - 0.5) * 130.0;
     let mass_adult = 315.0;
     let mass_old = 315.0 - (10.0 - 8.0) * 5.0;
-    
+
     assert!(mass_juvenile < mass_adult);
     assert!(mass_old < mass_adult);
 }

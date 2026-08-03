@@ -8,11 +8,11 @@
 //!    promise of checkpoints (resume exactly from state, e.g. ablation studies
 //!    with altered parameters).
 
-use avian_core::{Simulation, SimulationConfig};
-use avian_core::checkpoint::{deserialize_world, serialize_world};
-use avian_core::components::{FSMState, Position, Metabolism, AgentUid};
 use avian_agent::gerontology::spawn_agent;
 use avian_agent::systems::{run_systems, spawn_grain};
+use avian_core::checkpoint::{deserialize_world, serialize_world};
+use avian_core::components::{AgentUid, FSMState, Metabolism, Position};
+use avian_core::{Simulation, SimulationConfig};
 use avian_telemetry::exporter::TelemetryExporter;
 use hecs::World;
 use nalgebra::Vector2;
@@ -63,9 +63,7 @@ fn fingerprint(sim: &Simulation) -> String {
         .world
         .query::<(&AgentUid, &Position, &Metabolism, &FSMState)>()
         .iter()
-        .map(|(_, (uid, pos, meta, fsm))| {
-            (uid.0.clone(), [pos.0.x, pos.0.y], meta.energy_kj, 0.0)
-        })
+        .map(|(_, (uid, pos, meta, fsm))| (uid.0.clone(), [pos.0.x, pos.0.y], meta.energy_kj, 0.0))
         .collect();
     // Sort by UID so entity traversal order doesn't affect the digest.
     agents.sort_by(|a, b| a.0.cmp(&b.0));
@@ -73,7 +71,11 @@ fn fingerprint(sim: &Simulation) -> String {
     for (_, _, _, f) in agents.iter() {
         let _ = f;
     }
-    for (_, (_, _, _, fsm_state)) in sim.world.query::<(&AgentUid, &Position, &Metabolism, &FSMState)>().iter() {
+    for (_, (_, _, _, fsm_state)) in sim
+        .world
+        .query::<(&AgentUid, &Position, &Metabolism, &FSMState)>()
+        .iter()
+    {
         *fsm.entry(format!("{:?}", fsm_state)).or_insert(0) += 1;
     }
     let mut fsm_keys: Vec<_> = fsm.keys().cloned().collect();
@@ -85,7 +87,10 @@ fn fingerprint(sim: &Simulation) -> String {
         .join(",");
     out.push_str(&format!(" FSM[{}]", fsm_part));
     for (uid, pos, energy, _) in agents {
-        out.push_str(&format!("|{}@{:.4},{:.4}E{:.4}", uid, pos[0], pos[1], energy));
+        out.push_str(&format!(
+            "|{}@{:.4},{:.4}E{:.4}",
+            uid, pos[0], pos[1], energy
+        ));
     }
     out
 }
@@ -114,13 +119,17 @@ fn test_checkpoint_roundtrip_preserves_state() {
         (restored.total_energy_intake_kj - sim.total_energy_intake_kj).abs() < 1e-9,
         "intake mismatch"
     );
+    assert!((restored.total_energy_expenditure_kj - sim.total_energy_expenditure_kj).abs() < 1e-9);
     assert!(
-        (restored.total_energy_expenditure_kj - sim.total_energy_expenditure_kj).abs() < 1e-9
+        (restored.total_energy_lost_at_death_kj - sim.total_energy_lost_at_death_kj).abs() < 1e-9
     );
-    assert!((restored.total_energy_lost_at_death_kj - sim.total_energy_lost_at_death_kj).abs() < 1e-9);
 
     // Agent set must be identical (same count, same UIDs, same positions).
-    assert_eq!(fingerprint(&restored), fingerprint(&sim), "roundtrip digest mismatch");
+    assert_eq!(
+        fingerprint(&restored),
+        fingerprint(&sim),
+        "roundtrip digest mismatch"
+    );
     assert_eq!(
         sim.world.query::<&Position>().iter().count(),
         restored.world.query::<&Position>().iter().count(),
@@ -135,7 +144,11 @@ fn test_checkpoint_roundtrip_preserves_state() {
     for _ in 0..50 {
         restored.step(|s, dt| run_systems(s, dt, &mut exporter2));
     }
-    assert_ne!(before, fingerprint(&restored), "restored sim did not advance");
+    assert_ne!(
+        before,
+        fingerprint(&restored),
+        "restored sim did not advance"
+    );
 
     let _ = std::fs::remove_file(&path);
 }

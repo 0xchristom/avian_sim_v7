@@ -9,9 +9,9 @@
 //! <5ms/frame; 100k telemetry frames exported in <30s. This measurement gates
 //! 5.3 (custom physics) and drives 5.6 (caching) and 6.6 (render opts).
 
-use avian_core::{Simulation, SimulationConfig};
 use avian_agent::gerontology::spawn_agent;
 use avian_agent::systems::{run_systems, spawn_grain};
+use avian_core::{Simulation, SimulationConfig};
 use avian_physics::PhysicsWorld;
 use avian_telemetry::exporter::{TelemetryExporter, TelemetryFrame};
 use nalgebra::Vector2;
@@ -54,7 +54,13 @@ fn bench_agents(n: usize, frames: u64) {
         let x = sim.rng.gen_range(2.0..30.0);
         let y = sim.rng.gen_range(2.0..19.0);
         let uid = sim.next_uid_str();
-        spawn_agent(&mut sim.world, &mut sim.rng, Vector2::new(x, y), &mut sim.physics, uid);
+        spawn_agent(
+            &mut sim.world,
+            &mut sim.rng,
+            Vector2::new(x, y),
+            &mut sim.physics,
+            uid,
+        );
     }
     for _ in 0..(n / 2).max(1) {
         let x = sim.rng.gen_range(2.0..30.0);
@@ -62,10 +68,21 @@ fn bench_agents(n: usize, frames: u64) {
         spawn_grain(&mut sim, Vector2::new(x, y), 10);
     }
     if std::env::var("BENCH_NOGRAINS").is_ok() {
-        let grains: Vec<_> = sim.world.query::<&avian_core::components::Grain>().iter().map(|(e, _)| e).collect();
-        for g in grains { let _ = sim.world.despawn(g); }
+        let grains: Vec<_> = sim
+            .world
+            .query::<&avian_core::components::Grain>()
+            .iter()
+            .map(|(e, _)| e)
+            .collect();
+        for g in grains {
+            let _ = sim.world.despawn(g);
+        }
     }
-    let grain_count = sim.world.query::<&avian_core::components::Grain>().iter().count();
+    let grain_count = sim
+        .world
+        .query::<&avian_core::components::Grain>()
+        .iter()
+        .count();
 
     // Warmup (physics/scheduler JIT-ish effects, allocator caches).
     for _ in 0..300 {
@@ -84,7 +101,11 @@ fn bench_agents(n: usize, frames: u64) {
     );
     println!(
         "target {}: {}",
-        if n <= 30 { "<1 ms/frame @120fps" } else { "<5 ms/frame @60fps" },
+        if n <= 30 {
+            "<1 ms/frame @120fps"
+        } else {
+            "<5 ms/frame @60fps"
+        },
         if (n <= 30 && ms_per_frame < 1.0) || (n > 30 && ms_per_frame < 5.0) {
             "PASS"
         } else {
@@ -113,7 +134,8 @@ fn bench_physics(n: usize, frames: u64) {
     println!("physics-only {n} bodies: {ms_per_frame:.3} ms/frame");
 }
 
-fn bench_export(n: usize) {    let frame = |i: usize| TelemetryFrame {
+fn bench_export(n: usize) {
+    let frame = |i: usize| TelemetryFrame {
         time_us: i as u64 * 8333,
         frame: i as u32,
         uid: format!("A{:04}-{:06}", 1, i % 1000),
@@ -145,7 +167,11 @@ fn bench_export(n: usize) {    let frame = |i: usize| TelemetryFrame {
     println!("export {n} frames in {dt:.2}s: {throughput:.0} frames/s");
     println!(
         "target 100k < 30s: {}",
-        if n >= 100_000 && dt < 30.0 { "PASS" } else { "FAIL" }
+        if n >= 100_000 && dt < 30.0 {
+            "PASS"
+        } else {
+            "FAIL"
+        }
     );
     let _ = std::fs::remove_file(&path);
 }

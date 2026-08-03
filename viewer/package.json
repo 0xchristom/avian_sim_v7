@@ -10,7 +10,10 @@
     "name": "avian-viewer",
     "version": "1.0.0",
     "scripts": {
-        "start": "vite"
+        "start": "vite",
+        "typecheck": "tsc --noEmit",
+        "build": "tsc --noEmit && vite build",
+        "preview": "vite preview"
     },
     "dependencies": {
         "react": "^18.2.0",

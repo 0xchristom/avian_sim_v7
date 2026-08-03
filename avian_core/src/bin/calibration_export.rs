@@ -17,7 +17,10 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            manifest.join("..").join("analysis").join("calibration_export.json")
+            manifest
+                .join("..")
+                .join("analysis")
+                .join("calibration_export.json")
         });
 
     if let Some(parent) = path.parent() {

@@ -2,11 +2,11 @@
 //! weather, rain cutting vision range (a bird stops foraging for distant
 //! grain), heat raising energy expenditure, and wind drifting the flock.
 
+use avian_agent::systems::run_systems;
 use avian_core::calibration;
 use avian_core::components::{Age, FSMState, Metabolism, Weather};
 use avian_core::events::{Event, SetWeatherRequest};
 use avian_core::{Simulation, SimulationConfig};
-use avian_agent::systems::run_systems;
 use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 
@@ -42,13 +42,7 @@ fn rain_reduces_vision_and_stops_foraging_for_distant_grain() {
         sim.environment.weather = weather;
         sim.environment.weather_intensity = intensity;
         // Pin critical energy so the root tree force-forages.
-        let e = sim
-            .world
-            .query::<&Metabolism>()
-            .iter()
-            .next()
-            .unwrap()
-            .0;
+        let e = sim.world.query::<&Metabolism>().iter().next().unwrap().0;
         let mut meta = sim.world.get::<&mut Metabolism>(e).unwrap();
         meta.energy_kj = 4.0;
         drop(meta);
@@ -80,7 +74,10 @@ fn rain_reduces_vision_and_stops_foraging_for_distant_grain() {
         rain < 0.05,
         "rain: bird must NOT see the 9 m grain (vision 6 m), got {rain:.2} foraging"
     );
-    assert!(clear > rain, "clear foraging ({clear:.2}) must beat rain ({rain:.2})");
+    assert!(
+        clear > rain,
+        "clear foraging ({clear:.2}) must beat rain ({rain:.2})"
+    );
 }
 
 fn spawn_grain_at(sim: &mut Simulation, pos: Vector2<f64>) {
@@ -154,7 +151,9 @@ fn set_weather_event_applies_and_ramps_smoothly() {
     sim.config.weather_enabled = true;
 
     let mut exporter = TelemetryExporter::new(usize::MAX);
-    sim.inject_event(Event::SetWeather(SetWeatherRequest { weather: Weather::Rain }));
+    sim.inject_event(Event::SetWeather(SetWeatherRequest {
+        weather: Weather::Rain,
+    }));
     for _ in 0..130 {
         sim.step(|s, dt| run_systems(s, dt, &mut exporter));
     }
@@ -165,7 +164,9 @@ fn set_weather_event_applies_and_ramps_smoothly() {
         sim.environment.weather_intensity
     );
 
-    sim.inject_event(Event::SetWeather(SetWeatherRequest { weather: Weather::Clear }));
+    sim.inject_event(Event::SetWeather(SetWeatherRequest {
+        weather: Weather::Clear,
+    }));
     for _ in 0..130 {
         sim.step(|s, dt| run_systems(s, dt, &mut exporter));
     }
@@ -184,7 +185,7 @@ fn snapshot_includes_weather() {
     sim.environment.weather = Weather::Wind;
     sim.environment.weather_intensity = 0.5;
     let snap = sim.snapshot();
-    assert_eq!(snap.weather, "Wind");
+    assert_eq!(snap.weather, Weather::Wind);
     assert_eq!(snap.weather_intensity, 0.5);
 }
 

@@ -1,10 +1,10 @@
 //! 2.2b acceptance: a predator despawns after a randomized 5-15 s lifetime, and
 //! its disappearance is logged as a `RemovePredator` ground-truth event.
 
-use avian_core::{Simulation, SimulationConfig};
+use avian_agent::systems::run_systems;
 use avian_core::components::Predator;
 use avian_core::events::Event;
-use avian_agent::systems::run_systems;
+use avian_core::{Simulation, SimulationConfig};
 use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 
@@ -44,7 +44,10 @@ fn test_predator_expires_within_5_15s_and_logs_event() {
         .events_log
         .iter()
         .any(|(_, e)| matches!(e, Event::RemovePredator(_)));
-    assert!(has_remove, "predator despawn was not logged as RemovePredator");
+    assert!(
+        has_remove,
+        "predator despawn was not logged as RemovePredator"
+    );
 }
 
 #[test]

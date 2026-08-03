@@ -1,14 +1,14 @@
-use avian_core::calibration;
-use avian_core::events::Event;
 use avian_agent::gerontology::spawn_agent;
 use avian_agent::metrics::compute_metrics;
 use avian_agent::systems::{run_systems, spawn_grain};
-use avian_telemetry::{Format, TelemetryExporter, TelemetryMetadata, write_metadata};
+use avian_core::calibration;
+use avian_core::events::Event;
+use avian_telemetry::{write_metadata, Format, TelemetryExporter, TelemetryMetadata};
 use std::net::TcpListener;
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tungstenite::accept;
-use std::net::TcpStream;
 use tungstenite::WebSocket;
 
 /// Audit 2 Task 1: outbound broadcast pacing interval (~60 Hz real time).
@@ -36,49 +36,68 @@ fn main() {
     let urban = args.iter().any(|a| a == "--urban");
     // 4.4: opt-in stochastic weather scheduler (Clear/Rain/Wind/Heat).
     let weather = args.iter().any(|a| a == "--weather");
-    let frames_target: u64 = args.iter()
+    let frames_target: u64 = args
+        .iter()
         .position(|a| a == "--frames")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(0); // 0 = unlimited
-    // Per-run seed — metadata.json is designed to track this per run.
-    let seed: u64 = args.iter()
+                       // Per-run seed — metadata.json is designed to track this per run.
+    let seed: u64 = args
+        .iter()
         .position(|a| a == "--seed")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(42);
     // Telemetry file output is opt-in via `--output <path>`. Without it the
     // server runs without writing any dataset, so it never grows a dataset.csv.
-    let output_path = args.iter()
+    let output_path = args
+        .iter()
         .position(|a| a == "--output")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.to_string());
-    let events_file = args.iter()
+    let events_file = args
+        .iter()
         .position(|a| a == "--events-file")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.to_string());
     // 3.4: export format. `--format jsonl` for the lossless debug format.
-    let format = args.iter()
+    let format = args
+        .iter()
         .position(|a| a == "--format")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| Format::from_str(s))
         .unwrap_or(Format::Csv);
     // 5.2: base scenario from a `simulation.toml` file. CLI flags below override
     // the file on collision (explicit command line wins over a file default).
-    let config_path = args.iter()
+    let config_path = args
+        .iter()
         .position(|a| a == "--config")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.to_string());
 
     let mut config = match &config_path {
         Some(path) => match avian_core::SimulationConfig::from_file(path) {
-            Ok(c) => { println!("Scenario config loaded from {path}"); c }
+            Ok(c) => {
+                println!("Scenario config loaded from {path}");
+                c
+            }
             Err(e) => {
                 eprintln!("Failed to read config file {path}: {e}");
                 std::process::exit(1);
             }
         },
-        None => avian_core::SimulationConfig::default(),
+        // Audit 4 §9.7: the interactive server auto-loads `scenarios/simulation.toml`
+        // when it exists (e.g. its longer day_length_sim_s for a legible day/night
+        // cycle), so the viewer scenario works without a --config flag. An explicit
+        // --config above wins; a missing file falls back to the compiled default.
+        None => match avian_core::SimulationConfig::from_file("scenarios/simulation.toml") {
+            Ok(c) => {
+                println!("Scenario config auto-loaded from scenarios/simulation.toml");
+                c
+            }
+            Err(_) => avian_core::SimulationConfig::default(),
+        },
     };
     // CLI overrides (win over the file).
     config.urban_obstacles |= urban;
@@ -110,10 +129,14 @@ fn main() {
     // Telemetry file is only opened when --output is supplied.
     if let Some(out) = &out_path {
         // Fix #8: Open telemetry file at startup — stream to disk, no data loss
-        exporter.open_with_format(std::path::Path::new(out), format).expect("Failed to open telemetry file");
+        exporter
+            .open_with_format(std::path::Path::new(out), format)
+            .expect("Failed to open telemetry file");
         // 2.5: side-car event log for ground-truth annotations.
         let events_out = out.replace(&format!(".{ext}"), ".events.jsonl");
-        exporter.open_event_log(std::path::Path::new(&events_out)).ok();
+        exporter
+            .open_event_log(std::path::Path::new(&events_out))
+            .ok();
     }
 
     // 3.7: dataset metadata (schema authority) written up front; reward stats
@@ -123,21 +146,27 @@ fn main() {
         serde_json::to_value(&config).unwrap_or(serde_json::json!({})),
         30,
         [calibration::WORLD_WIDTH_M, calibration::WORLD_HEIGHT_M],
-        events_file.clone()
+        events_file
+            .clone()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .map(|c| c.lines().map(|l| l.to_string()).collect())
             .unwrap_or_default(),
         0,
         None,
     );
-    let meta_path = out_path.as_deref().map(|out| out.replace(&format!(".{ext}"), ".metadata.json"));
+    let meta_path = out_path
+        .as_deref()
+        .map(|out| out.replace(&format!(".{ext}"), ".metadata.json"));
     if let Some(mp) = &meta_path {
         let _ = write_metadata(std::path::Path::new(mp), &metadata);
     }
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
-    ctrlc::set_handler(move || { r.store(false, Ordering::SeqCst); }).ok();
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .ok();
 
     // 5.2: initial population/grains come from the scenario config.
     for _ in 0..config.initial_agents {
@@ -146,7 +175,10 @@ fn main() {
             sim.config.world_height,
             &sim.obstacles,
             &mut sim.rng,
-        );
+        )
+        .unwrap_or_else(|| {
+            nalgebra::Vector2::new(sim.config.world_width / 2.0, sim.config.world_height / 2.0)
+        });
         let uid = sim.next_uid_str();
         spawn_agent(&mut sim.world, &mut sim.rng, pos, &mut sim.physics, uid);
     }
@@ -177,21 +209,38 @@ fn main() {
 
     // Fix #3: Headless mode — run simulation without any client
     if headless {
-        println!("Headless mode: running {} frames, output to {}",
-            if frames_target == 0 { "unlimited".to_string() } else { frames_target.to_string() },
-            out_path.as_deref().unwrap_or("(no telemetry file)"));
+        println!(
+            "Headless mode: running {} frames, output to {}",
+            if frames_target == 0 {
+                "unlimited".to_string()
+            } else {
+                frames_target.to_string()
+            },
+            out_path.as_deref().unwrap_or("(no telemetry file)")
+        );
         let mut frame: u64 = 0;
         while running.load(Ordering::SeqCst) {
-            if frames_target > 0 && frame >= frames_target { break; }
+            if frames_target > 0 && frame >= frames_target {
+                break;
+            }
             sim.step(|s, dt| run_systems(s, dt, &mut exporter));
             frame += 1;
             if frame % 1000 == 0 {
-                println!("Frame {} — agents: {}, grains: {}, telemetry frames: {}",
-                    frame, sim.snapshot().agents.len(), sim.snapshot().grains.len(), exporter.frame_count());
+                println!(
+                    "Frame {} — agents: {}, grains: {}, telemetry frames: {}",
+                    frame,
+                    sim.snapshot().agents.len(),
+                    sim.snapshot().grains.len(),
+                    exporter.frame_count()
+                );
             }
         }
-        println!("Headless run complete. {} frames, {} telemetry frames written to {}",
-            frame, exporter.frame_count(), out_path.as_deref().unwrap_or("(telemetry disabled)"));
+        println!(
+            "Headless run complete. {} frames, {} telemetry frames written to {}",
+            frame,
+            exporter.frame_count(),
+            out_path.as_deref().unwrap_or("(telemetry disabled)")
+        );
         // 3.4/3.7: flush pending `next_fsm` frames + finalize metadata.
         exporter.finish();
         metadata.sim_frames = frame;
@@ -268,13 +317,16 @@ fn main() {
                                 // 6.1: transport control commands (pause/step/
                                 // speed) — never injected into the sim.
                                 if let Ok(ctrl) = serde_json::from_str::<serde_json::Value>(&text) {
-                                    if let Some(cmd) = ctrl.get("command").and_then(|c| c.as_str()) {
+                                    if let Some(cmd) = ctrl.get("command").and_then(|c| c.as_str())
+                                    {
                                         match cmd {
                                             "pause" => paused = true,
                                             "resume" => paused = false,
                                             "step" => pending_step = true,
                                             "speed" => {
-                                                if let Some(v) = ctrl.get("value").and_then(|v| v.as_f64()) {
+                                                if let Some(v) =
+                                                    ctrl.get("value").and_then(|v| v.as_f64())
+                                                {
                                                     speed = v.max(0.1);
                                                 }
                                             }
@@ -294,14 +346,26 @@ fn main() {
                                 if parts.len() == 3 {
                                     let x = parts[1].parse().unwrap_or(10.0);
                                     let y = parts[2].parse().unwrap_or(10.0);
-                                    pending_events.push(Event::SpawnGrain(avian_core::events::SpawnGrainRequest { pos: [x, y], count: 10 }));
+                                    pending_events.push(Event::SpawnGrain(
+                                        avian_core::events::SpawnGrainRequest {
+                                            pos: [x, y],
+                                            count: 10,
+                                        },
+                                    ));
                                     spawn_grain(&mut sim, nalgebra::Vector2::new(x, y), 10);
                                 }
                             }
                         }
                     }
-                    Err(tungstenite::Error::Io(ref e)) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                    Err(_) => { disconnected.push(i); break; }
+                    Err(tungstenite::Error::Io(ref e))
+                        if e.kind() == std::io::ErrorKind::WouldBlock =>
+                    {
+                        break
+                    }
+                    Err(_) => {
+                        disconnected.push(i);
+                        break;
+                    }
                 }
             }
         }
@@ -317,56 +381,48 @@ fn main() {
 
             // Build each payload ONCE per broadcast tick, not once per client.
             let snap = sim.snapshot();
-            let json = serde_json::to_string(&snap).unwrap();
 
-            // 6.1: surface injected scenario events to every client (event log).
-            let event_msg: Option<String> = if !pending_events.is_empty() {
-                let events_json: Vec<serde_json::Value> = pending_events
-                    .iter()
-                    .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
-                    .collect();
+            // Audit 4 §9.6: ONE coalesced message per broadcast tick — snapshot,
+            // event_log, and metrics ride in a single JSON object / single
+            // ws.send per client (down from up to 3 sends). Cuts per-tick I/O
+            // call count 3x and removes the partial-send stall window on slow
+            // connections.
+            let event_log = if !pending_events.is_empty() {
                 Some(serde_json::json!({
-                    "type": "event_log",
                     "frame": frame,
-                    "events": events_json,
-                }).to_string())
+                    "events": pending_events
+                        .iter()
+                        .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
+                        .collect::<Vec<_>>(),
+                }))
             } else {
                 None
             };
-
-            // 6.2: dashboard metrics every ~100 frames (cheap aggregate pass).
-            let metrics_msg: Option<String> = if metrics_pending {
-                let m = compute_metrics(&snap, sim.predator_kills, sim.grains_consumed, &sim.death_ages);
-                Some(serde_json::json!({
-                    "type": "metrics",
-                    "metrics": m,
-                }).to_string())
+            let metrics = if metrics_pending {
+                Some(compute_metrics(
+                    &snap,
+                    sim.predator_kills,
+                    sim.grains_consumed,
+                    &sim.death_ages,
+                    sim.config.world_width,
+                    sim.config.world_height,
+                ))
             } else {
                 None
             };
+            let text = serde_json::json!({
+                "snapshot": snap,
+                "event_log": event_log,
+                "metrics": metrics,
+            })
+            .to_string();
 
             for (i, ws) in clients.iter_mut().enumerate() {
-                // Send snapshot. WouldBlock → skip this client this broadcast
-                // (try again next time); any genuine error → disconnect.
-                if let Err(e) = ws.send(tungstenite::Message::Text(json.clone())) {
+                // WouldBlock → skip this client this broadcast (try again next
+                // time); any genuine error → disconnect.
+                if let Err(e) = ws.send(tungstenite::Message::Text(text.clone())) {
                     if send_error_is_fatal(&e) {
                         disconnected.push(i);
-                    }
-                }
-
-                if let Some(ev_msg) = &event_msg {
-                    if let Err(e) = ws.send(tungstenite::Message::Text(ev_msg.clone())) {
-                        if send_error_is_fatal(&e) {
-                            disconnected.push(i);
-                        }
-                    }
-                }
-
-                if let Some(m_msg) = &metrics_msg {
-                    if let Err(e) = ws.send(tungstenite::Message::Text(m_msg.clone())) {
-                        if send_error_is_fatal(&e) {
-                            disconnected.push(i);
-                        }
                     }
                 }
             }
@@ -389,12 +445,18 @@ fn main() {
 
         // 5.2/6.1: interactive pacing = 16 ms / (time_scale × speed). Speed
         // 1×/10×/100× from the viewer's time controls shortens the sleep.
+        // Audit 4 §9.3: this is the server-side 60fps cap — the loop never
+        // spins faster than ~60 Hz regardless of client count. Do NOT remove.
         std::thread::sleep(std::time::Duration::from_secs_f64(
             16.0 / 1000.0 / sim.config.time_scale / speed,
         ));
     }
 
-    println!("Shutting down. {} telemetry frames written to {}", exporter.frame_count(), out_path.as_deref().unwrap_or("(telemetry disabled)"));
+    println!(
+        "Shutting down. {} telemetry frames written to {}",
+        exporter.frame_count(),
+        out_path.as_deref().unwrap_or("(telemetry disabled)")
+    );
     exporter.finish();
     metadata.sim_frames = frame;
     metadata.reward_stats = exporter.reward_stats();

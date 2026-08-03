@@ -33,10 +33,15 @@ pub fn default_weights() -> BoidWeights {
 
 /// 2.1 state modulation: fleeing gets stronger separation (and its alignment/
 /// cohesion are zeroed — though Fleeing is also fully suppressed upstream);
-/// foraging weakens cohesion so birds spread out to search.
+/// foraging drops cohesion to ZERO (Audit 4 §9.8: a foraging bird is influenced
+/// by separation only — it is never pulled toward the flock centroid, so it
+/// can search on its own instead of orbiting the group's center of mass).
 pub fn weights_for_state(state: FSMState, base: &BoidWeights) -> BoidWeights {
     match state {
-        FSMState::Foraging => BoidWeights { cohesion: base.cohesion * 0.3, ..*base },
+        FSMState::Foraging => BoidWeights {
+            cohesion: 0.0,
+            ..*base
+        },
         FSMState::Fleeing => BoidWeights {
             separation: base.separation * 1.5,
             alignment: 0.0,

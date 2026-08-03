@@ -10,8 +10,8 @@
 //! (3.3) — never the raw `hecs::Entity`, which is meaningless across a
 //! network/file boundary.
 
-use serde::{Serialize, Deserialize};
 use crate::components::Weather;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SpawnGrainRequest {
@@ -68,8 +68,7 @@ mod tests {
         });
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(
-            json,
-            r#"{"event":"spawn_grain","pos":[5.0,6.0],"count":10}"#,
+            json, r#"{"event":"spawn_grain","pos":[5.0,6.0],"count":10}"#,
             "wire shape changed — downstream parsers break"
         );
     }
@@ -77,12 +76,24 @@ mod tests {
     #[test]
     fn test_event_roundtrip_all_variants() {
         let events = vec![
-            Event::SpawnGrain(SpawnGrainRequest { pos: [1.0, 2.0], count: 3 }),
+            Event::SpawnGrain(SpawnGrainRequest {
+                pos: [1.0, 2.0],
+                count: 3,
+            }),
             Event::SpawnPredator(SpawnPredatorRequest { pos: [4.0, 5.0] }),
-            Event::RemovePredator(RemovePredatorRequest { uid: "A0001-000001".into() }),
-            Event::SetWeather(SetWeatherRequest { weather: Weather::Rain }),
-            Event::TeleportAgent(TeleportAgentRequest { uid: "A0001-000002".into(), pos: [9.0, 8.0] }),
-            Event::KillAgent(KillAgentRequest { uid: "A0001-000003".into() }),
+            Event::RemovePredator(RemovePredatorRequest {
+                uid: "A0001-000001".into(),
+            }),
+            Event::SetWeather(SetWeatherRequest {
+                weather: Weather::Rain,
+            }),
+            Event::TeleportAgent(TeleportAgentRequest {
+                uid: "A0001-000002".into(),
+                pos: [9.0, 8.0],
+            }),
+            Event::KillAgent(KillAgentRequest {
+                uid: "A0001-000003".into(),
+            }),
         ];
         for ev in events {
             let json = serde_json::to_string(&ev).unwrap();

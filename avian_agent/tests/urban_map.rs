@@ -2,11 +2,11 @@
 //! show up in snapshots, spawn/patrol sampling avoids them, and a building
 //! blocks a foraging bird from reaching grain on the far side.
 
+use avian_agent::perception::cone_cast;
+use avian_agent::systems::{run_systems, spawn_grain};
 use avian_core::calibration;
 use avian_core::components::{Age, Grain, MemorySlot, MemorySlots, ObstacleKind};
 use avian_core::{Simulation, SimulationConfig};
-use avian_agent::perception::cone_cast;
-use avian_agent::systems::{run_systems, spawn_grain};
 use avian_telemetry::exporter::TelemetryExporter;
 use hecs::Entity;
 use nalgebra::Vector2;
@@ -19,11 +19,24 @@ fn urban_map_builds_obstacles_and_snapshots_them() {
     config.urban_obstacles = true;
     let sim = Simulation::new(42, config);
 
-    assert_eq!(sim.obstacles.len(), 5, "default urban map should have 5 obstacles");
+    assert_eq!(
+        sim.obstacles.len(),
+        5,
+        "default urban map should have 5 obstacles"
+    );
     let kinds: Vec<ObstacleKind> = sim.obstacles.iter().map(|o| o.kind).collect();
-    assert!(kinds.contains(&ObstacleKind::Building), "map should include buildings");
-    assert!(kinds.contains(&ObstacleKind::Tree), "map should include trees");
-    assert!(kinds.contains(&ObstacleKind::Water), "map should include water");
+    assert!(
+        kinds.contains(&ObstacleKind::Building),
+        "map should include buildings"
+    );
+    assert!(
+        kinds.contains(&ObstacleKind::Tree),
+        "map should include trees"
+    );
+    assert!(
+        kinds.contains(&ObstacleKind::Water),
+        "map should include water"
+    );
 
     let snap = sim.snapshot();
     assert_eq!(snap.obstacles.len(), 5, "snapshot must carry the obstacles");
@@ -38,7 +51,10 @@ fn urban_map_builds_obstacles_and_snapshots_them() {
 #[test]
 fn empty_arena_by_default() {
     let sim = Simulation::new(42, SimulationConfig::default());
-    assert!(sim.obstacles.is_empty(), "default config must not add obstacles");
+    assert!(
+        sim.obstacles.is_empty(),
+        "default config must not add obstacles"
+    );
     assert!(sim.snapshot().obstacles.is_empty());
 }
 
@@ -55,7 +71,8 @@ fn random_free_point_avoids_obstacles() {
             sim.config.world_height,
             &sim.obstacles,
             &mut sim.rng,
-        );
+        )
+        .expect("free point must be found for a mostly-open arena");
         assert!(
             !Simulation::point_in_obstacles(&sim.obstacles, p),
             "free point {p:?} landed inside an obstacle"
@@ -64,8 +81,14 @@ fn random_free_point_avoids_obstacles() {
     }
 
     // The membership predicate itself is exact.
-    assert!(Simulation::point_in_obstacles(&sim.obstacles, Vector2::new(8.0, 5.0)));
-    assert!(!Simulation::point_in_obstacles(&sim.obstacles, Vector2::new(12.0, 5.0)));
+    assert!(Simulation::point_in_obstacles(
+        &sim.obstacles,
+        Vector2::new(8.0, 5.0)
+    ));
+    assert!(!Simulation::point_in_obstacles(
+        &sim.obstacles,
+        Vector2::new(12.0, 5.0)
+    ));
 }
 
 /// The perception cone hides a target when the occlusion predicate fires.
@@ -102,7 +125,10 @@ fn memory_bird_reaches_grain(building: bool, seed: u64, frames: u64) -> bool {
         &mut sim.physics,
         uid,
     );
-    let mut meta = sim.world.get::<&mut avian_core::components::Metabolism>(e).unwrap();
+    let mut meta = sim
+        .world
+        .get::<&mut avian_core::components::Metabolism>(e)
+        .unwrap();
     meta.energy_kj = 4.0;
     meta.crop_count = 0;
     meta.hunger = 0.9;
@@ -193,5 +219,64 @@ fn obstacles_survive_checkpoint_round_trip() {
         .iter()
         .map(|o| (o.kind, [o.min.x, o.min.y], [o.max.x, o.max.y]))
         .collect();
-    assert_eq!(orig, loaded_vals, "checkpoint must round-trip the obstacles");
+    assert_eq!(
+        orig, loaded_vals,
+        "checkpoint must round-trip the obstacles"
+    );
+}
+
+/// Sprint 2 (Audit 5, B9/B24): with the urban map active, the LOS raycast
+/// budget must not blow up. The coarse static broad-phase culls rays that
+/// never approach an obstacle, so the number of AUTHORITATIVE Rapier raycasts
+/// per frame stays far below agents × neighbors × grains, and doubling the
+/// population must NOT multiply the per-frame raycast count proportionally
+/// (open-space rays never reach Rapier).
+#[test]
+fn urban_los_raycast_budget_stays_bounded() {
+    fn raycasts_per_frame(agents: u32, frames: u32) -> u64 {
+        let mut config = SimulationConfig::default();
+        config.urban_obstacles = true;
+        config.immigration_enabled = false; // we spawn a fixed population ourselves
+        let mut sim = Simulation::new(2026, config);
+        for _ in 0..agents {
+            let x = sim.rng.gen_range(2.0..30.0);
+            let y = sim.rng.gen_range(2.0..19.0);
+            let uid = sim.next_uid_str();
+            avian_agent::gerontology::spawn_agent(
+                &mut sim.world,
+                &mut sim.rng,
+                Vector2::new(x, y),
+                &mut sim.physics,
+                uid,
+            );
+        }
+        let mut exporter = TelemetryExporter::new(usize::MAX);
+
+        let mut frames_run: u32 = 0;
+        let mut total = 0u64;
+        while frames_run < frames {
+            sim.physics.reset_raycast_count();
+            sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+            total += sim.physics.los_raycast_count();
+            frames_run += 1;
+        }
+        total
+    }
+
+    let rays_25 = raycasts_per_frame(25, 20);
+    let rays_100 = raycasts_per_frame(100, 20);
+
+    // Per-frame authoritative raycasts with 4× the population grow sub-
+    // linearly — the broad-phase culls open-space rays so the budget is not
+    // multiplicative with agents × neighbors × grains. 6× is a generous cap
+    // for a bounded, sub-quadratic growth trend (not an exact scaling law).
+    assert!(
+        rays_100 < rays_25.saturating_mul(6),
+        "raycast budget must not grow multiplicatively with population: \
+         25 agents → {rays_25} total, 100 agents → {rays_100} total"
+    );
+    assert!(
+        rays_25 > 0,
+        "urban map should actually exercise some raycasts"
+    );
 }

@@ -1,6 +1,6 @@
-use nalgebra::Vector2;
-use avian_core::components::*;
 use avian_core::components::HeadBobPhase;
+use avian_core::components::*;
+use nalgebra::Vector2;
 
 pub struct VaultingGait {
     pub leg_length_m: f64,
@@ -15,7 +15,7 @@ impl VaultingGait {
         let t = (phase / self.duty_factor).clamp(0.0, 1.0);
         self.leg_length_m * (1.0 - 0.2 * t * (1.0 - t))
     }
-    
+
     pub fn update(&mut self, vel: &Velocity, dt: f64) -> f64 {
         let freq = 2.0 + vel.0.norm() * 1.5;
         self.stance_phase += freq * dt;
@@ -34,28 +34,37 @@ pub struct HeadBobSystem {
 }
 
 impl HeadBobSystem {
-    pub fn update(&mut self, vel: &Velocity, heading: f64, dt: f64) -> (HeadBobPhase, Vector2<f64>) {
+    pub fn update(
+        &mut self,
+        vel: &Velocity,
+        heading: f64,
+        dt: f64,
+    ) -> (HeadBobPhase, Vector2<f64>) {
         let v_mag = vel.0.norm();
         let optic_flow = v_mag;
-        
+
         self.time_in_phase += dt;
-        
+
         let mut offset = Vector2::zeros();
-        
+
         // Fix: threshold was 3.0 but max speed is 1.2 m/s — head bob never activated.
         // Real pigeons head-bob at walking speeds (~0.3 m/s and above).
         if optic_flow < 0.3 {
             self.current_phase = HeadBobPhase::Hold;
             self.time_in_phase = 0.0;
         } else {
-            if matches!(self.current_phase, HeadBobPhase::Hold) && self.time_in_phase >= self.hold_duration {
+            if matches!(self.current_phase, HeadBobPhase::Hold)
+                && self.time_in_phase >= self.hold_duration
+            {
                 self.current_phase = HeadBobPhase::Thrust;
                 self.time_in_phase = 0.0;
-            } else if matches!(self.current_phase, HeadBobPhase::Thrust) && self.time_in_phase >= self.thrust_duration {
+            } else if matches!(self.current_phase, HeadBobPhase::Thrust)
+                && self.time_in_phase >= self.thrust_duration
+            {
                 self.current_phase = HeadBobPhase::Hold;
                 self.time_in_phase = 0.0;
             }
-            
+
             if matches!(self.current_phase, HeadBobPhase::Thrust) {
                 let t = self.time_in_phase / self.thrust_duration;
                 let jerk = 10.0 * t.powi(3) - 15.0 * t.powi(4) + 6.0 * t.powi(5);
@@ -64,7 +73,7 @@ impl HeadBobSystem {
                 offset.y = distance * jerk * heading.sin();
             }
         }
-        
+
         (self.current_phase, offset)
     }
 }

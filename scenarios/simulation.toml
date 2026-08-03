@@ -21,6 +21,14 @@ initial_grains = 15
 # dt = 0.008333333333333333
 # time_scale = 1.0
 
+# Audit 4 §9.7: length of one full day/night cycle in sim-seconds. The compiled
+# default (600 s, calibration::DAY_LENGTH_SIM_S) makes a day pass in ~17 real
+# minutes even at 1× speed — after a 10×/100× burst it can read as "stuck
+# fast". This longer, more legible cycle (~66 min at 1×) is what the
+# interactive-view scenario uses; headless data-generation runs keep the
+# compiled default unless they set this explicitly.
+day_length_sim_s = 2400.0
+
 # Hunger threshold that flips the root Forage condition (default = the
 # biology constant FORAGING_HUNGER_THRESHOLD).
 # foraging_threshold = 0.4

@@ -1,7 +1,7 @@
-use avian_core::{Simulation, SimulationConfig};
-use avian_core::events::{Event, SpawnGrainRequest};
-use avian_agent::systems::run_systems;
 use avian_agent::gerontology::spawn_agent;
+use avian_agent::systems::run_systems;
+use avian_core::events::{Event, SpawnGrainRequest};
+use avian_core::{Simulation, SimulationConfig};
 use avian_telemetry::exporter::TelemetryExporter;
 use bincode;
 
@@ -50,7 +50,10 @@ fn test_bit_perfect_1000_frames() {
     let snap1 = bincode::serialize(&sim1.snapshot()).unwrap();
     let snap2 = bincode::serialize(&sim2.snapshot()).unwrap();
     assert_eq!(sim1.time.frame, 1000);
-    assert_eq!(snap1, snap2, "Snapshots diverge at 1000 frames! Determinism broken.");
+    assert_eq!(
+        snap1, snap2,
+        "Snapshots diverge at 1000 frames! Determinism broken."
+    );
 }
 
 // 7.1: with injected events the run must stay reproducible — events are part
@@ -69,17 +72,26 @@ fn test_bit_perfect_with_injected_events() {
         // Same event schedule injected into both runs at the same frames.
         match frame {
             50 => {
-                let ev = Event::SpawnGrain(SpawnGrainRequest { pos: [5.0, 5.0], count: 10 });
+                let ev = Event::SpawnGrain(SpawnGrainRequest {
+                    pos: [5.0, 5.0],
+                    count: 10,
+                });
                 sim1.inject_event(ev.clone());
                 sim2.inject_event(ev);
             }
             150 => {
-                let ev = Event::SpawnGrain(SpawnGrainRequest { pos: [20.0, 15.0], count: 5 });
+                let ev = Event::SpawnGrain(SpawnGrainRequest {
+                    pos: [20.0, 15.0],
+                    count: 5,
+                });
                 sim1.inject_event(ev.clone());
                 sim2.inject_event(ev);
             }
             300 => {
-                let ev = Event::SpawnGrain(SpawnGrainRequest { pos: [10.0, 3.0], count: 8 });
+                let ev = Event::SpawnGrain(SpawnGrainRequest {
+                    pos: [10.0, 3.0],
+                    count: 8,
+                });
                 sim1.inject_event(ev.clone());
                 sim2.inject_event(ev);
             }
@@ -89,7 +101,10 @@ fn test_bit_perfect_with_injected_events() {
 
     let snap1 = bincode::serialize(&sim1.snapshot()).unwrap();
     let snap2 = bincode::serialize(&sim2.snapshot()).unwrap();
-    assert_eq!(snap1, snap2, "Event-injected runs diverged! Determinism broken.");
+    assert_eq!(
+        snap1, snap2,
+        "Event-injected runs diverged! Determinism broken."
+    );
 }
 
 // 3.3: stable uids are deterministic per seed and follow the A{session}-{id}
@@ -105,6 +120,62 @@ fn test_stable_uids_deterministic() {
     for (a, b) in snap1.agents.iter().zip(snap2.agents.iter()) {
         assert_eq!(a.uid, b.uid, "uid must be deterministic per seed");
         assert!(a.uid.starts_with("A0001-"), "uid format broken: {}", a.uid);
-        assert!(!a.uid.contains('%'), "raw arena index leaked into uid: {}", a.uid);
+        assert!(
+            !a.uid.contains('%'),
+            "raw arena index leaked into uid: {}",
+            a.uid
+        );
     }
+}
+
+// Sprint 1 (Audit 5 4.5): the predator contact roll resolves post-physics
+// positions in a stable entity-id order; reproduction (nested heap pushes that
+// reorder by weight) must not leak RNG streams. Both runs bit-match with a
+// predator present and reproduction enabled.
+#[test]
+fn test_bit_perfect_with_predator_contact_and_reproduction() {
+    let cfg = SimulationConfig {
+        predator_expiry: false,
+        predator_fill_meals: false,
+        ..SimulationConfig::default()
+    };
+    let mut build = || {
+        let mut sim = Simulation::new(7, cfg.clone());
+        let center = nalgebra::Vector2::new(16.0, 10.5);
+        for _ in 0..20 {
+            let x = center.x + sim.rng.gen_range(-5.0..5.0);
+            let y = center.y + sim.rng.gen_range(-5.0..5.0);
+            let uid = sim.next_uid_str();
+            spawn_agent(
+                &mut sim.world,
+                &mut sim.rng,
+                nalgebra::Vector2::new(x, y),
+                &mut sim.physics,
+                uid,
+            );
+        }
+        sim.spawn_predator(center);
+        sim
+    };
+
+    let mut sim1 = build();
+    let mut sim2 = build();
+    let mut exp1 = TelemetryExporter::new(5000);
+    let mut exp2 = TelemetryExporter::new(5000);
+
+    for _ in 0..5000 {
+        sim1.step(|s, dt| run_systems(s, dt, &mut exp1));
+        sim2.step(|s, dt| run_systems(s, dt, &mut exp2));
+    }
+
+    assert!(
+        sim1.predator_kills > 0,
+        "predator should capture at least once"
+    );
+    let snap1 = bincode::serialize(&sim1.snapshot()).unwrap();
+    let snap2 = bincode::serialize(&sim2.snapshot()).unwrap();
+    assert_eq!(
+        snap1, snap2,
+        "Predator-contact runs diverged! Determinism broken."
+    );
 }

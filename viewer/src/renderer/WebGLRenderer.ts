@@ -9,6 +9,7 @@ const FSM_COLORS: Record<string, number> = {
   Spacer: 0x888888,
   Preening: 0x00e5ff,
   Sick: 0xcc44ff,
+  Roosting: 0x6b5bff,
 };
 
 // 6.5: morph variants — gray / brown feral / white, chosen per-agent from the UID.
@@ -52,6 +53,11 @@ export class WebGLRenderer {
   // 6.5: animation clock (seconds) for wing flap + peck pulses.
   private animTime = 0;
   private lastFrameMs = performance.now();
+  // Audit 4 §9.2: actual PAINT fps, measured from the same rAF clock that
+  // drives animTime (no second clock). Rolling average over a 500 ms window.
+  private paintFrames = 0;
+  private paintWindowStart = performance.now();
+  private paintFpsValue = 0;
   // 6.6: pooled dummy objects — created once, reused every frame (zero
   // `new Object3D` during render).
   private dummyBody = new THREE.Object3D();
@@ -66,8 +72,11 @@ export class WebGLRenderer {
   // 6.6: dirty-flag cache — only recompute an instance matrix when
   // pos/heading/mass/head actually changed since the last snapshot.
   private agentCache = new Map<string, { pos: [number, number]; heading: number; mass: number; bob: [number, number]; fsm: string }>();
-  private grainCache = new Map<string, [number, number]>();
-  private predCache = new Map<string, [number, number]>();
+  // Audit 4 §9.1: bounded index-based dirty caches for grains/predators (raw
+  // Vecs are position-ordered and never reorder). No uid-keyed growth, no
+  // per-frame string keys.
+  private lastGrains: Array<[number, number]> | null = null;
+  private lastPreds: any[] | null = null;
 
   // Visual constants (renderer-only; ground truth lives in calibration.rs).
   private static readonly FOV_CONE_RADIUS = 3.0;
@@ -313,6 +322,11 @@ export class WebGLRenderer {
     return this.viewZoom;
   }
 
+  // Audit 4 §9.2: real paint fps (measured from the rAF clock in render()).
+  paintFps(): number {
+    return this.paintFpsValue;
+  }
+
   private applyCamera() {
     const halfW = WebGLRenderer.WORLD_W / (2 * this.viewZoom);
     const halfH = WebGLRenderer.WORLD_H / (2 * this.viewZoom);
@@ -361,6 +375,14 @@ export class WebGLRenderer {
     this.lastFrameMs = now;
     const t = this.animTime;
 
+    // Audit 4 §9.2: paint-fps from this same per-frame delta (rolling 500 ms).
+    this.paintFrames += 1;
+    if (now - this.paintWindowStart >= 500) {
+      this.paintFpsValue = Math.round((this.paintFrames * 1000) / (now - this.paintWindowStart));
+      this.paintFrames = 0;
+      this.paintWindowStart = now;
+    }
+
     // Audit 3 Phase 4: network interpolation. Trailing the real-time clock by
     // one inter-arrival interval means `renderTime` always falls between the
     // two received snapshots, so entities glide continuously instead of
@@ -371,25 +393,28 @@ export class WebGLRenderer {
       ? Math.min(1, Math.max(0, (now - lastReceivedAt - inter) / inter))
       : 1;
 
-    const prevAgents = new Map<string, any>();
-    if (previousSnapshot) {
+    // Audit 4 §9.1: the interpolation arrays/Map are only allocated while
+    // actually interpolating (alpha < 1). In the steady state — a snapshot per
+    // ~16 ms broadcast with alpha held at 1 between arrivals — we pass the raw
+    // snapshot arrays straight through, so render() does zero per-frame
+    // allocation on the agent/predator hot path (this was the dominant
+    // client-side GC source during long sessions).
+    let effectiveAgents: any[] = snapshot.agents;
+    let effectivePredators: any[] = snapshot.predators || [];
+    if (previousSnapshot && alpha < 1) {
+      const prevAgents = new Map<string, any>();
       for (const a of previousSnapshot.agents || []) prevAgents.set(a.uid, a);
-    }
-    const resolvedAgents = snapshot.agents.map((a: any) => {
-      const p = prevAgents.get(a.uid);
-      if (!p || alpha >= 1) return a;
-      return WebGLRenderer.resolveAgent(p, a, alpha);
-    });
-
-    const prevPreds = new Map<string, any>();
-    if (previousSnapshot) {
+      effectiveAgents = snapshot.agents.map((a: any) => {
+        const p = prevAgents.get(a.uid);
+        return p ? WebGLRenderer.resolveAgent(p, a, alpha) : a;
+      });
+      const prevPreds = new Map<string, any>();
       for (const pp of previousSnapshot.predators || []) prevPreds.set(pp.uid, pp);
+      effectivePredators = (snapshot.predators || []).map((pp: any) => {
+        const p = prevPreds.get(pp.uid);
+        return p ? WebGLRenderer.resolveAgent(p, pp, alpha) : pp;
+      });
     }
-    const resolvedPredators = (snapshot.predators || []).map((pp: any) => {
-      const p = prevPreds.get(pp.uid);
-      if (!p || alpha >= 1) return pp;
-      return WebGLRenderer.resolveAgent(p, pp, alpha);
-    });
 
     // 6.6: grow instance capacity once (if the population exceeded the pool).
     const n = snapshot.agents.length;
@@ -414,7 +439,7 @@ export class WebGLRenderer {
     // 6.5: nearest-grain distance per agent (for the peck trigger).
     const grains = snapshot.grains || [];
 
-    resolvedAgents.forEach((agent: any, i: number) => {
+    effectiveAgents.forEach((agent: any, i: number) => {
       const angle = agent.heading;
       const mass = agent.mass_g ? agent.mass_g / 315.0 : 1.0;
       const bob = agent.head_offset || [0, 0];
@@ -516,7 +541,7 @@ export class WebGLRenderer {
 
     // 6.6: prune cache entries for agents that left the sim (stale UIDs).
     if (this.agentCache.size > n) {
-      const live = new Set(resolvedAgents.map((a: any) => a.uid));
+      const live = new Set(effectiveAgents.map((a: any) => a.uid));
       for (const uid of this.agentCache.keys()) {
         if (!live.has(uid)) this.agentCache.delete(uid);
       }
@@ -538,40 +563,42 @@ export class WebGLRenderer {
     if (this.stateRingMesh.instanceColor) this.stateRingMesh.instanceColor.needsUpdate = true;
 
     if (snapshot.grains) {
-      snapshot.grains.forEach((g: any, i: number) => {
-        // 6.6: skip unchanged grains (dirty-flag per grain id).
-        const key = `${g[0].toFixed(4)},${g[1].toFixed(4)}`;
-        const cachedGrain = this.grainCache.get(key);
-        if (cachedGrain && cachedGrain[0] === g[0] && cachedGrain[1] === g[1]) return;
-        this.grainCache.set(key, [g[0], g[1]]);
+      const grains = snapshot.grains;
+      const prevGrains = this.lastGrains;
+      grains.forEach((g: any, i: number) => {
+        // 6.6 + Audit 4 §9.1: index-based dirty check (grains are a
+        // position-ordered Vec, never reorder) — replaces the per-frame
+        // `toFixed(4)` string-key allocations and the unbounded grainCache.
+        if (prevGrains && prevGrains[i] && prevGrains[i][0] === g[0] && prevGrains[i][1] === g[1]) return;
         dummyGrain.position.set(g[0], g[1], 0);
         dummyGrain.scale.set(1, 1, 1);
         dummyGrain.updateMatrix();
         this.grainMesh.setMatrixAt(i, dummyGrain.matrix);
       });
-      this.grainMesh.count = snapshot.grains.length;
+      this.lastGrains = grains;
+      this.grainMesh.count = grains.length;
       this.grainMesh.instanceMatrix.needsUpdate = true;
-      if (this.grainCache.size > snapshot.grains.length * 2) {
-        this.grainCache.clear();
-      }
     }
 
     if (snapshot.predators) {
-      resolvedPredators.forEach((p: any, i: number) => {
-        const cachedPred = this.predCache.get(p.uid);
-        if (cachedPred && cachedPred[0] === p.pos[0] && cachedPred[1] === p.pos[1]) return;
-        this.predCache.set(p.uid, [p.pos[0], p.pos[1]]);
+      const prevPredsArr = this.lastPreds;
+      effectivePredators.forEach((p: any, i: number) => {
+        // 6.6 + Audit 4 §9.1: index-based dirty check — replaces the never-
+        // pruned uid-keyed predCache (which grew unbounded as predators died
+        // and new uids spawned over a long session).
+        if (prevPredsArr && prevPredsArr[i] && prevPredsArr[i].pos[0] === p.pos[0] && prevPredsArr[i].pos[1] === p.pos[1]) return;
         dummyPred.position.set(p.pos[0], p.pos[1], 0.2);
         dummyPred.scale.set(1, 1, 1);
         dummyPred.updateMatrix();
         this.predatorMesh.setMatrixAt(i, dummyPred.matrix);
       });
+      this.lastPreds = effectivePredators;
       this.predatorMesh.count = snapshot.predators.length;
       this.predatorMesh.instanceMatrix.needsUpdate = true;
     }
 
     // 2.2b: countdown label (remaining seconds, small font) beside each predator.
-    this.updatePredatorLabels(resolvedPredators);
+    this.updatePredatorLabels(effectivePredators);
 
     // 4.3: draw the static urban obstacles.
     this.updateObstacles(snapshot.obstacles || []);
@@ -579,26 +606,31 @@ export class WebGLRenderer {
     // 6.1: flock neighbor connection lines between nearby agents. Audit 2
     // Task 2: skip the O(n²) pair scan entirely when the lines are hidden.
     if (this.neighborLinesVisible) {
-      this.updateNeighborLines(resolvedAgents);
+      this.updateNeighborLines(effectiveAgents);
     }
 
     // 6.1: memory dots — remembered food as fading dots per agent.
-    this.updateMemoryDots(resolvedAgents);
+    this.updateMemoryDots(effectiveAgents);
 
     // Marking tool: green ring around every selected agent/predator.
-    this.updateSelectionMarkers(resolvedAgents, resolvedPredators, selectedUids);
+    this.updateSelectionMarkers(effectiveAgents, effectivePredators, selectedUids);
 
     // 6.1: FOV cone for the hovered + selected agents (agent head direction).
-    this.updateFovCones(resolvedAgents, selectedUids, hoveredUid);
-
-    // 2.3: dim toward night — light_level 1.0 (noon) → overlay 0, 0.1 → 0.9.
-    if (typeof snapshot.light_level === 'number') {
-      const mat = this.nightOverlay.material as THREE.MeshBasicMaterial;
-      mat.opacity = Math.max(0, 1 - snapshot.light_level);
-    }
+    this.updateFovCones(effectiveAgents, selectedUids, hoveredUid);
 
     // 4.4: tint the scene by weather (scaled by the smooth transition intensity).
-    this.updateWeatherOverlay(snapshot.weather, snapshot.weather_intensity);
+    const weatherOpacity = this.updateWeatherOverlay(snapshot.weather, snapshot.weather_intensity);
+
+    // 2.3 + Audit 4 §9.4: dim toward night — light_level 1.0 (noon) → 0,
+    // 0.1 (darkest) → 0.9, scaled to a 0.65 ceiling. Combined with any weather
+    // tint the total is capped at 0.75 so the scene NEVER approaches full
+    // black (light_level floors at 0.1 but birds/dashboard must stay legible
+    // through the darkest rainy night).
+    if (typeof snapshot.light_level === 'number') {
+      const mat = this.nightOverlay.material as THREE.MeshBasicMaterial;
+      const nightDim = Math.max(0, 1 - snapshot.light_level) * 0.65;
+      mat.opacity = Math.max(0, Math.min(nightDim, 0.75 - weatherOpacity));
+    }
 
     this.renderer.render(this.scene, this.camera);
   }
@@ -689,18 +721,23 @@ export class WebGLRenderer {
     }
   }
 
-  private updateWeatherOverlay(weather: string, intensity: number) {
+  // Audit 4 §9.4: returns the applied weather-tint opacity so the caller can
+  // cap the COMBINED night+weather darkness (never full black).
+  private updateWeatherOverlay(weather: string, intensity: number): number {
     const i = Math.min(1, Math.max(0, intensity ?? 0));
     const mat = this.weatherOverlay.material as THREE.MeshBasicMaterial;
+    let opacity = 0;
     if (weather === 'Rain') {
       mat.color.setHex(0x2f6fdb);
-      mat.opacity = 0.35 * i;
+      opacity = 0.35 * i;
     } else if (weather === 'Heat') {
       mat.color.setHex(0xff9a3c);
-      mat.opacity = 0.25 * i;
+      opacity = 0.25 * i;
     } else {
-      mat.opacity = 0;
+      mat.color.setHex(0xffffff);
     }
+    mat.opacity = opacity;
+    return opacity;
   }
 
   // 4.3: rebuild the static obstacle quads from the snapshot each frame.

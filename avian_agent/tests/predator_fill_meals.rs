@@ -3,11 +3,11 @@
 //! after eating 3 pigeons" request — and the disappearance is logged as a
 //! `RemovePredator` ground-truth event (same path as lifetime expiry).
 
-use avian_core::{Simulation, SimulationConfig};
+use avian_agent::gerontology::spawn_agent;
+use avian_agent::systems::run_systems;
 use avian_core::components::{Age, AgentUid, Metabolism, Position};
 use avian_core::events::Event;
-use avian_agent::systems::run_systems;
-use avian_agent::gerontology::spawn_agent;
+use avian_core::{Simulation, SimulationConfig};
 use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 
@@ -15,12 +15,24 @@ use nalgebra::Vector2;
 /// from the encounter so they never interfere.
 fn populate_dummies(sim: &mut Simulation) {
     let dummy_positions = [
-        [2.0, 2.0], [2.0, 19.0], [4.0, 2.0], [4.0, 19.0],
-        [28.0, 2.0], [28.0, 19.0], [30.0, 2.0], [30.0, 19.0],
+        [2.0, 2.0],
+        [2.0, 19.0],
+        [4.0, 2.0],
+        [4.0, 19.0],
+        [28.0, 2.0],
+        [28.0, 19.0],
+        [30.0, 2.0],
+        [30.0, 19.0],
     ];
     for [x, y] in dummy_positions {
         let uid = sim.next_uid_str();
-        spawn_agent(&mut sim.world, &mut sim.rng, Vector2::new(x, y), &mut sim.physics, uid);
+        spawn_agent(
+            &mut sim.world,
+            &mut sim.rng,
+            Vector2::new(x, y),
+            &mut sim.physics,
+            uid,
+        );
     }
 }
 
@@ -33,7 +45,10 @@ fn force_sick(sim: &mut Simulation, e: hecs::Entity) {
 fn face_away(sim: &mut Simulation, e: hecs::Entity, from: Vector2<f64>) {
     let p = sim.world.get::<&Position>(e).unwrap().0;
     let dir = p - from;
-    sim.world.get::<&mut avian_core::components::Heading>(e).unwrap().0 = dir.y.atan2(dir.x);
+    sim.world
+        .get::<&mut avian_core::components::Heading>(e)
+        .unwrap()
+        .0 = dir.y.atan2(dir.x);
 }
 
 #[test]
@@ -59,7 +74,13 @@ fn test_predator_despawns_after_three_meals() {
             _ => Vector2::new(0.0, 1.5),
         };
         let uid = sim.next_uid_str();
-        let e = spawn_agent(&mut sim.world, &mut sim.rng, center + off, &mut sim.physics, uid.clone());
+        let e = spawn_agent(
+            &mut sim.world,
+            &mut sim.rng,
+            center + off,
+            &mut sim.physics,
+            uid.clone(),
+        );
         force_sick(&mut sim, e);
         face_away(&mut sim, e, center);
         meals.push(uid);
@@ -73,7 +94,13 @@ fn test_predator_despawns_after_three_meals() {
     let mut despawned = false;
     for _ in 0..15000 {
         sim.step(|s, dt| run_systems(s, dt, &mut exporter));
-        if sim.world.query::<&avian_core::components::Predator>().iter().next().is_none() {
+        if sim
+            .world
+            .query::<&avian_core::components::Predator>()
+            .iter()
+            .next()
+            .is_none()
+        {
             despawned = true;
             break;
         }
@@ -92,5 +119,8 @@ fn test_predator_despawns_after_three_meals() {
         .events_log
         .iter()
         .any(|(_, e)| matches!(e, Event::RemovePredator(r) if r.uid == predator_uid));
-    assert!(has_remove, "3-meal despawn was not logged as RemovePredator");
+    assert!(
+        has_remove,
+        "3-meal despawn was not logged as RemovePredator"
+    );
 }

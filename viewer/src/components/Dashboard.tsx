@@ -59,6 +59,8 @@ const FSM_COLORS: Record<string, string> = {
   NightRest: '#4488ff',
   Wandering: '#ffcc00',
   CriticalEnergy: '#ff6600',
+  Roosting: '#6b5bff',
+  Scanning: '#00e5ff',
 };
 
 const fsmColor = (state: string) => FSM_COLORS[state] ?? '#888';

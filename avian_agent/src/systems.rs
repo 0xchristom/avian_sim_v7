@@ -1,17 +1,17 @@
-use avian_core::Simulation;
-use avian_core::AgentSnapshot;
-use avian_core::{GrainVisCacheEntry, NeighborCacheEntry};
-use avian_core::components::*;
-use avian_core::calibration;
 use crate::behavior_tree::{build_default_tree, AgentContext};
-use crate::locomotion::HeadBobSystem;
-use crate::perception::cone_cast;
-use crate::metabolism::metabolism_system;
-use crate::gerontology::{mortality_hazard, spawn_agent};
 use crate::flocking;
+use crate::gerontology::{mortality_hazard, spawn_agent};
+use crate::locomotion::HeadBobSystem;
+use crate::metabolism::metabolism_system;
+use crate::perception::cone_cast;
 use crate::predator;
-use avian_telemetry::rlhf::{state_to_observation, RLReward};
+use avian_core::calibration;
+use avian_core::components::*;
+use avian_core::AgentSnapshot;
+use avian_core::Simulation;
+use avian_core::{GrainVisCacheEntry, NeighborCacheEntry};
 use avian_telemetry::exporter::TelemetryExporter;
+use avian_telemetry::rlhf::{state_to_observation, RLReward};
 use hecs::Entity;
 use nalgebra::Vector2;
 use rustc_hash::FxHashMap;
@@ -38,7 +38,11 @@ fn remember_food(slots: &mut Vec<MemorySlot>, pos: Vector2<f64>) {
         if let Some(idx) = slots
             .iter()
             .enumerate()
-            .min_by(|a, b| a.1.strength.partial_cmp(&b.1.strength).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|a, b| {
+                a.1.strength
+                    .partial_cmp(&b.1.strength)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(i, _)| i)
         {
             slots.remove(idx);
@@ -62,13 +66,15 @@ struct RlExportData {
 }
 
 pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExporter) {
-    // 2.3 day/night cycle. A full day = DAY_LENGTH_SIM_S sim-seconds.
-    sim.environment.time_of_day_hours += dt / calibration::DAY_LENGTH_SIM_S * 24.0;
+    // 2.3 day/night cycle. A full day = sim.config.day_length_sim_s sim-seconds
+    // (Audit 4 §9.7: scenario-tunable via simulation.toml; defaults to the
+    // calibration constant DAY_LENGTH_SIM_S for headless runs).
+    sim.environment.time_of_day_hours += dt / sim.config.day_length_sim_s * 24.0;
     sim.environment.time_of_day_hours %= 24.0;
     let h = sim.environment.time_of_day_hours;
     // Smooth sinusoid: noon (12h) = 1.0, midnight (0h/24h) = 0.1.
-    sim.environment.light_level = 0.1
-        + 0.9 * (0.5 + 0.5 * (2.0 * std::f64::consts::PI * (h - 12.0) / 24.0).cos());
+    sim.environment.light_level =
+        0.1 + 0.9 * (0.5 + 0.5 * (2.0 * std::f64::consts::PI * (h - 12.0) / 24.0).cos());
     // Phase 9 (Audit 3): sun direction drives which building side hosts the
     // thermal updraft. Sunrise (6h) = east (0), noon (12h) = south (-π/2),
     // sunset (18h) = west (π). Deterministic function of time only.
@@ -107,18 +113,27 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
 
     // Spatial grid rebuild (once per tick). Agents only — grains excluded so
     // they never appear as neighbors. Velocities map feeds boids alignment.
-    sim.spatial_grid.clear();
+    // Sprint 2 (Audit 5, B21): a single `(&Position, &Velocity, &Metabolism)`
+    // query replaces the scattered per-entity `World::get` calls, so the agent
+    // population is visited exactly once per tick.
+    // Sprint 2 (Audit 5, B22): INCREMENTAL update — only agents that crossed a
+    // cell boundary are re-bucketed (no full clear+reinsert), and entities that
+    // despawned since the last tick are dropped via `sync_from`. Unmoved agents
+    // keep their bucket slots, so a mostly-stationary population costs ~0
+    // re-hashes per frame.
+    sim.spatial_grid.last_update_moves = 0;
     let mut positions = FxHashMap::default();
     let mut velocities = FxHashMap::default();
-    for (id, pos) in sim.world.query::<&Position>().iter() {
-        if sim.world.get::<&Velocity>(id).is_ok() && sim.world.get::<&Metabolism>(id).is_ok() {
-            positions.insert(id, pos.0);
-            if let Ok(vel) = sim.world.get::<&Velocity>(id) {
-                velocities.insert(id, vel.0);
-            }
-            sim.spatial_grid.insert(id, pos.0);
-        }
+    for (id, (pos, vel, _meta)) in sim
+        .world
+        .query::<(&Position, &Velocity, &Metabolism)>()
+        .iter()
+    {
+        positions.insert(id, pos.0);
+        velocities.insert(id, vel.0);
+        sim.spatial_grid.update(id, pos.0);
     }
+    sim.spatial_grid.sync_from(&positions);
 
     // Audit 3 (Phase 2): grains get their own spatial index (rebuilt per tick,
     // capacity retained) so visibility + consumption are O(agents × local
@@ -144,7 +159,12 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     // hecs entity ids are generation-aware, so a stale key can never alias a
     // reused slot, but it would still grow without bound over a long run.
     if sim.time.frame % calibration::CACHE_PRUNE_FRAMES == 0 {
-        let live: HashSet<Entity> = sim.world.query::<&Metabolism>().iter().map(|(e, _)| e).collect();
+        let live: HashSet<Entity> = sim
+            .world
+            .query::<&Metabolism>()
+            .iter()
+            .map(|(e, _)| e)
+            .collect();
         sim.grain_vis_cache.retain(|k, _| live.contains(k));
         sim.neighbor_cache.retain(|k, _| live.contains(k));
     }
@@ -218,10 +238,42 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         std::collections::HashMap::new()
     };
 
-    for (id, (pos, head, vel, meta, levy, fsm, mass, mobility, vision, head_bob, age, _phys_handle, uid, alarm, feather))
-        in sim.world.query_mut::<(&mut Position, &mut Heading, &mut Velocity, &mut Metabolism, &mut LevyState,
-            &mut FSMState, &Mass, &Mobility, &Vision, &mut HeadBob, &mut Age, &PhysicsHandle, &AgentUid, &mut Alarm, &mut FeatherCondition)>()
-    {
+    for (
+        id,
+        (
+            pos,
+            head,
+            vel,
+            meta,
+            levy,
+            fsm,
+            mass,
+            mobility,
+            vision,
+            head_bob,
+            age,
+            _phys_handle,
+            uid,
+            alarm,
+            feather,
+        ),
+    ) in sim.world.query_mut::<(
+        &mut Position,
+        &mut Heading,
+        &mut Velocity,
+        &mut Metabolism,
+        &mut LevyState,
+        &mut FSMState,
+        &Mass,
+        &Mobility,
+        &Vision,
+        &mut HeadBob,
+        &mut Age,
+        &PhysicsHandle,
+        &AgentUid,
+        &mut Alarm,
+        &mut FeatherCondition,
+    )>() {
         // 2.6 feather decay — rain multiplies the rate (hook for 4.4).
         let rain_mult = if sim.environment.weather == Weather::Rain {
             calibration::RAIN_FEATHER_DECAY_MULTIPLIER
@@ -273,7 +325,8 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         } else {
             12.5 * mass_kg * v_mag / 1000.0
         };
-        let night_factor = if sim.environment.light_level < calibration::NIGHT_REST_LIGHT_THRESHOLD {
+        let night_factor = if sim.environment.light_level < calibration::NIGHT_REST_LIGHT_THRESHOLD
+        {
             calibration::NIGHT_DRAIN_FACTOR
         } else {
             1.0
@@ -287,7 +340,7 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
 
         let blood_glucose = meta.gizzard_count as f64 * 0.5;
         meta.hunger = 0.6 * (1.0 - meta.crop_count as f64 / meta.crop_max as f64)
-                    + 0.4 * (1.0 - blood_glucose / 5.0).max(0.0);
+            + 0.4 * (1.0 - blood_glucose / 5.0).max(0.0);
 
         // Fix #6: Query neighbors only from agent positions (grains excluded).
         // 4.4: vision_range shrinks in rain (wet feathers, overcast).
@@ -307,7 +360,9 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
             1
         };
         let neighbors_raw: Vec<(Entity, f64)> = if sim.time.frame % refresh_period == 0 {
-            let raw = sim.spatial_grid.query_k_nearest(pos.0, 7, vision_range, &positions);
+            let raw = sim
+                .spatial_grid
+                .query_k_nearest(pos.0, 7, vision_range, &positions);
             sim.neighbor_cache.insert(
                 id,
                 NeighborCacheEntry {
@@ -326,11 +381,15 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
                         .filter_map(|e| positions.get(e).map(|p| (*e, (p - pos.0).norm())))
                         .collect()
                 })
-                .unwrap_or_else(|| sim.spatial_grid.query_k_nearest(pos.0, 7, vision_range, &positions))
+                .unwrap_or_else(|| {
+                    sim.spatial_grid
+                        .query_k_nearest(pos.0, 7, vision_range, &positions)
+                })
         };
-        let targets: Vec<(Entity, Vector2<f64>)> = neighbors_raw.iter().filter_map(|(e, _)| {
-            positions.get(e).map(|p| (*e, *p))
-        }).collect();
+        let targets: Vec<(Entity, Vector2<f64>)> = neighbors_raw
+            .iter()
+            .filter_map(|(e, _)| positions.get(e).map(|p| (*e, *p)))
+            .collect();
         // 4.3: line-of-sight occlusion — walls/buildings block neighbor AND
         // grain vision. `sim.physics` is a disjoint field from `sim.world`
         // (borrowed by query_mut above), so raycasting here is sound.
@@ -343,13 +402,24 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
                 .cast_ray_to_static(pos.0, *target - pos.0, 1.0)
                 .map_or(false, |toi| toi < 1.0 - calibration::LOS_BLOCK_EPS)
         };
-        let visible_neighbors = cone_cast(pos.0, head.0, vision.fov_degrees, vision_range, &targets, &occluded);
-        let visible_neighbor_entities: Vec<Entity> = visible_neighbors.iter().map(|(e, _, _)| *e).collect();
+        let visible_neighbors = cone_cast(
+            pos.0,
+            head.0,
+            vision.fov_degrees,
+            vision_range,
+            &targets,
+            &occluded,
+        );
+        let visible_neighbor_entities: Vec<Entity> =
+            visible_neighbors.iter().map(|(e, _, _)| *e).collect();
         // Audit 3 (Phase 1): the per-agent RLHF export vectors are collected
         // only when telemetry is on — they feed `RlExportData` (obs_v1 neighbor
         // context), never the behavior tree. `Vec::new()` allocates nothing.
         let visible_neighbor_pos: Vec<[f64; 2]> = if telemetry_on {
-            visible_neighbors.iter().map(|(_, p, _)| [p.x, p.y]).collect()
+            visible_neighbors
+                .iter()
+                .map(|(_, p, _)| [p.x, p.y])
+                .collect()
         } else {
             Vec::new()
         };
@@ -375,7 +445,11 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         let visible_grains: Vec<(Entity, Vector2<f64>, u32)> = if let Some(v) = cached_visible {
             v.clone()
         } else {
-            let candidates = sim.grain_grid.query_radius(pos.0, vision_range);
+            let mut candidates = Vec::new();
+            sim.grain_grid
+                .query_radius_into(pos.0, vision_range, &mut candidates, &mut |e| {
+                    grain_info.get(&e).map(|(p, _)| *p)
+                });
             let visible: Vec<(Entity, Vector2<f64>, u32)> = candidates
                 .iter()
                 .filter_map(|e| {
@@ -427,7 +501,8 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         // Audit 3 (Phase 1): only consumed by the RLHF reward — skip the scan
         // entirely when telemetry is off.
         let flock_count = if telemetry_on {
-            neighbors_raw.iter()
+            neighbors_raw
+                .iter()
                 .filter(|(_, d)| *d <= calibration::REWARD_FLOCK_NEIGHBOR_DIST_M)
                 .count()
         } else {
@@ -435,7 +510,16 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         };
 
         let mut ctx = AgentContext {
-            pos, head, vel, meta, fsm, levy, mass, mobility, vision, head_bob,
+            pos,
+            head,
+            vel,
+            meta,
+            fsm,
+            levy,
+            mass,
+            mobility,
+            vision,
+            head_bob,
             neighbors: visible_neighbor_entities.clone(),
             grains: visible_grains,
             rng: &mut sim.rng,
@@ -463,7 +547,8 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
             && *ctx.fsm != FSMState::Fleeing
             && *ctx.fsm != FSMState::Preening
         {
-            let boid_neighbors: Vec<(Vector2<f64>, Vector2<f64>, f64)> = neighbors_raw.iter()
+            let boid_neighbors: Vec<(Vector2<f64>, Vector2<f64>, f64)> = neighbors_raw
+                .iter()
                 .filter_map(|(e, d)| match (positions.get(e), velocities.get(e)) {
                     (Some(p), Some(v)) if *d > 1e-6 => Some((*p, *v, *d)),
                     _ => None,
@@ -509,9 +594,15 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         if telemetry_on {
             let snap = AgentSnapshot {
                 uid: uid.0.clone(),
-                pos: [ctx.pos.0.x, ctx.pos.0.y], heading: ctx.head.0, vel: [ctx.vel.0.x, ctx.vel.0.y],
-                mass_g: ctx.mass.current_g, age_years: age.years, energy_kj: ctx.meta.energy_kj, hunger: ctx.meta.hunger,
-                fsm_state: format!("{:?}", ctx.fsm), head_offset: [ctx.head_bob.offset.x, ctx.head_bob.offset.y],
+                pos: [ctx.pos.0.x, ctx.pos.0.y],
+                heading: ctx.head.0,
+                vel: [ctx.vel.0.x, ctx.vel.0.y],
+                mass_g: ctx.mass.current_g,
+                age_years: age.years,
+                energy_kj: ctx.meta.energy_kj,
+                hunger: ctx.meta.hunger,
+                fsm_state: *ctx.fsm,
+                head_offset: [ctx.head_bob.offset.x, ctx.head_bob.offset.y],
                 alarm_triggered: alarm.0,
                 sick,
                 vitality: age.vitality,
@@ -531,7 +622,9 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     // 15 elements, hecs' tuple limit): an alarm that clears without a capture
     // this frame is a safely-ended fleeing episode (+0.5 one-shot).
     let mut flee_success_uids: HashSet<String> = HashSet::new();
-    for (_, (alarm_prev, alarm, uid)) in sim.world.query_mut::<(&mut AlarmPrev, &Alarm, &AgentUid)>() {
+    for (_, (alarm_prev, alarm, uid)) in
+        sim.world.query_mut::<(&mut AlarmPrev, &Alarm, &AgentUid)>()
+    {
         let was_alarmed = alarm_prev.0;
         let fleeing = alarm.0;
         if was_alarmed && !fleeing {
@@ -554,19 +647,25 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     };
     for (id, linvel) in commands {
         if let Ok(handle) = sim.world.get::<&PhysicsHandle>(id) {
-            if let Some(rb) = sim.physics.get_body_mut(handle.0) {
-                let v = linvel + wind_drift;
-                rb.set_linvel(nalgebra::Vector2::new(v.x as f32, v.y as f32), true);
-            }
+            let v = linvel + wind_drift;
+            // Sprint 2 (B10): don't force-wake sleeping/idle bodies when their
+            // requested velocity hasn't materially changed.
+            sim.physics.set_linvel_if_changed(
+                handle.0,
+                nalgebra::Vector2::new(v.x as f32, v.y as f32),
+                calibration::BODY_VELOCITY_WAKE_EPS,
+            );
         }
     }
     let pred_moves = predator::plan_movement(sim, &positions);
     for (id, linvel) in pred_moves {
         if let Ok(handle) = sim.world.get::<&PhysicsHandle>(id) {
-            if let Some(rb) = sim.physics.get_body_mut(handle.0) {
-                let v = linvel + wind_drift;
-                rb.set_linvel(nalgebra::Vector2::new(v.x as f32, v.y as f32), true);
-            }
+            let v = linvel + wind_drift;
+            sim.physics.set_linvel_if_changed(
+                handle.0,
+                nalgebra::Vector2::new(v.x as f32, v.y as f32),
+                calibration::BODY_VELOCITY_WAKE_EPS,
+            );
         }
     }
 
@@ -577,10 +676,16 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     let mut grains_to_consume: Vec<Entity> = Vec::new();
     let mut consumed_set: HashSet<Entity> = HashSet::new();
     let mut consumed_uids: Vec<String> = Vec::new();
-    
-    for (_id, (pos, _head, phys_handle, meta, fsm, uid, memory))
-        in sim.world.query_mut::<(&mut Position, &mut Heading, &PhysicsHandle, &mut Metabolism, &FSMState, &AgentUid, &mut MemorySlots)>()
-    {
+
+    for (_id, (pos, _head, phys_handle, meta, fsm, uid, memory)) in sim.world.query_mut::<(
+        &mut Position,
+        &mut Heading,
+        &PhysicsHandle,
+        &mut Metabolism,
+        &FSMState,
+        &AgentUid,
+        &mut MemorySlots,
+    )>() {
         if let Some(rb) = sim.physics.get_body(phys_handle.0) {
             let rb_pos = rb.translation();
             pos.0.x = rb_pos.x as f64;
@@ -592,7 +697,11 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
             // index instead of scanning the whole set, then sort candidates by
             // world-query order so the picked grain matches the legacy full-scan
             // loop exactly (bit-identical trajectories, deterministic).
-            let mut candidates: Vec<Entity> = sim.grain_grid.query_radius(pos.0, 0.5);
+            let mut candidates: Vec<Entity> = Vec::new();
+            sim.grain_grid
+                .query_radius_into(pos.0, 0.5, &mut candidates, &mut |e| {
+                    grain_info.get(&e).map(|(p, _)| *p)
+                });
             candidates.sort_by_key(|e| grain_order.get(e).copied().unwrap_or(usize::MAX));
             for g_id in candidates {
                 if consumed_set.contains(&g_id) {
@@ -621,7 +730,10 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     }
 
     // Sync predator positions from physics.
-    for (_id, (pos, _pred, phys_handle)) in sim.world.query_mut::<(&mut Position, &Predator, &PhysicsHandle)>() {
+    for (_id, (pos, _pred, phys_handle)) in sim
+        .world
+        .query_mut::<(&mut Position, &Predator, &PhysicsHandle)>()
+    {
         if let Some(rb) = sim.physics.get_body(phys_handle.0) {
             let rb_pos = rb.translation();
             pos.0.x = rb_pos.x as f64;
@@ -629,9 +741,25 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         }
     }
 
+    // Sprint 1 (Audit 5): `resolve_contact` must use the POST-physics agent
+    // positions, not the stale map built before `physics.step()` above. The
+    // original code passed the pre-step map, so contact was tested against
+    // where agents were one solver step ago — a predator chasing at 10 m/s
+    // moves 8 cm per step, which is inside the 1.0 m contact threshold's slack
+    // but still a real position error that delayed captures and let near-misses
+    // flicker. Rebuild the map from the just-synced `Position` components.
+    let mut post_step_positions: FxHashMap<Entity, Vector2<f64>> = FxHashMap::default();
+    for (id, (pos, _vel, _meta)) in sim
+        .world
+        .query::<(&Position, &Velocity, &Metabolism)>()
+        .iter()
+    {
+        post_step_positions.insert(id, pos.0);
+    }
+
     // 2.2 contact resolution (kills + cooldowns). Captured UIDs feed the 3.2
     // -10.0 one-shot reward at export.
-    let captured_uids = predator::resolve_contact(sim, &positions);
+    let captured_uids = predator::resolve_contact(sim, &post_step_positions);
 
     // 2.2b: expire predators whose randomized 5-15 s lifetime elapsed — remove
     // physics body + entity and log a `RemovePredator` ground-truth event.
@@ -671,16 +799,24 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     // 4.2: gated by config for deterministic single-bird tests.
     // 4.3: spawn into obstacle-free points so new arrivals aren't pinned
     // inside a building collider.
+    // Sprint 2 (Audit 5): capped at `max_agents` — immigration must never push
+    // the population over the configured hard limit (no live pool overrun).
     let live = sim.world.query::<&Metabolism>().iter().count();
     if sim.config.immigration_enabled && live < calibration::MIN_POPULATION {
-        let missing = calibration::MIN_POPULATION - live;
+        let missing = calibration::MIN_POPULATION
+            .min(sim.config.max_agents)
+            .saturating_sub(live);
         for _ in 0..missing {
-            let pos = avian_core::Simulation::random_free_point(
+            let Some(pos) = avian_core::Simulation::random_free_point(
                 sim.config.world_width,
                 sim.config.world_height,
                 &sim.obstacles,
                 &mut sim.rng,
-            );
+            ) else {
+                // 4.3 exhaust: no obstacle-free point found; skip rather than
+                // spawn inside a collider.
+                break;
+            };
             let uid = sim.next_uid_str();
             let e = spawn_agent(&mut sim.world, &mut sim.rng, pos, &mut sim.physics, uid);
             // 7.2: energy carried in by the respawned agent.
@@ -726,7 +862,13 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     let frame = sim.time.frame;
     let light_level = sim.environment.light_level;
     for data in agent_data_for_rl {
-        let obs = state_to_observation(&data.snap, &data.neighbor_pos, &data.grain_pos, &predator_positions, light_level);
+        let obs = state_to_observation(
+            &data.snap,
+            &data.neighbor_pos,
+            &data.grain_pos,
+            &predator_positions,
+            light_level,
+        );
         let grain_eaten = consumed_uids.iter().any(|u| u == &data.snap.uid);
         let captured = captured_uids.iter().any(|u| u == &data.snap.uid);
         let flee_success = flee_success_uids.contains(&data.snap.uid);
@@ -743,10 +885,18 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
 
         // 3.5 ground-truth event labels for this frame.
         let mut event_labels: Vec<String> = Vec::new();
-        if grain_eaten { event_labels.push("grain_consumed".into()); }
-        if captured { event_labels.push("captured".into()); }
-        if flee_success { event_labels.push("flee_success".into()); }
-        if data.snap.alarm_triggered { event_labels.push("predator_seen".into()); }
+        if grain_eaten {
+            event_labels.push("grain_consumed".into());
+        }
+        if captured {
+            event_labels.push("captured".into());
+        }
+        if flee_success {
+            event_labels.push("flee_success".into());
+        }
+        if data.snap.alarm_triggered {
+            event_labels.push("predator_seen".into());
+        }
 
         exporter.push(avian_telemetry::exporter::TelemetryFrame {
             time_us,
@@ -761,7 +911,7 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
             reward_starvation: reward.starvation,
             reward_captured: reward.captured,
             reward_flee_success: reward.flee_success,
-            fsm: data.snap.fsm_state.clone(),
+            fsm: data.snap.fsm_state.as_str().to_string(),
             event_labels,
             next_fsm: String::new(),
         });

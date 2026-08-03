@@ -1,20 +1,35 @@
 #![recursion_limit = "256"]
 
-pub mod time;
+pub mod calibration;
+pub mod checkpoint;
+pub mod components;
+pub mod events;
 pub mod rng;
 pub mod spatial;
-pub mod components;
-pub mod calibration;
-pub mod events;
-pub mod checkpoint;
+pub mod time;
 
-use hecs::World;
-use serde::{Serialize, Deserialize};
+use avian_physics::PhysicsWorld;
 use components::*;
 use events::Event;
-use avian_physics::PhysicsWorld;
+use hecs::World;
 use nalgebra::Vector2;
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
+
+/// Sprint 1 (Audit 5): structural, readable config-validation error. Each
+/// field violating a constraint is reported by name so a bad `simulation.toml`
+/// or a wrong programmatic config is obvious instead of failing later in a
+/// wall-clock mismatch, NaN body, or an infinite fixed-step loop.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigError(pub String);
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid simulation config: {}", self.0)
+    }
+}
+
+impl std::error::Error for ConfigError {}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -63,6 +78,13 @@ pub struct SimulationConfig {
     /// 5.2: real-time pacing multiplier for the interactive server (1× = 60fps
     /// pacing). Ignored in headless mode, where frames are the unit.
     pub time_scale: f64,
+    /// Audit 4 §9.7: length of one full day/night cycle in sim-seconds (drives
+    /// the `light_level` sinusoid in `systems.rs`). Scenario-tunable so the
+    /// interactive view can use a longer, more legible cycle than the compiled
+    /// calibration default (600 s) that headless data-generation runs use.
+    /// The default is the biology constant — an empty/omitted toml keeps the
+    /// exact current behavior.
+    pub day_length_sim_s: f64,
     /// 5.2: hunger threshold that flips the root Forage condition. Scenario-
     /// tunable; the biology constant FORAGING_HUNGER_THRESHOLD is the default.
     pub foraging_threshold: f64,
@@ -106,6 +128,7 @@ impl Default for SimulationConfig {
             initial_agents: 30,
             initial_grains: 15,
             time_scale: 1.0,
+            day_length_sim_s: calibration::DAY_LENGTH_SIM_S,
             foraging_threshold: calibration::FORAGING_HUNGER_THRESHOLD,
             flocking_enabled: true,
             obstacles: Vec::new(),
@@ -115,12 +138,122 @@ impl Default for SimulationConfig {
 }
 
 impl SimulationConfig {
+    /// Sprint 1 (Audit 5): validate the config against the invariants the
+    /// simulation depends on. Rejects `dt <= 0`, NaN, infinity, non-positive
+    /// world dimensions, `time_scale <= 0`, non-positive `day_length_sim_s`,
+    /// zero `max_agents`, absurd spawn counts, and non-finite gravity.
+    ///
+    /// The error is structural and readable: one human message naming the
+    /// offending field and value, so a bad `simulation.toml` or a wrong
+    /// programmatic config fails loudly at construction instead of later as a
+    /// NaN body, a zero-step infinite loop, or a wall-clock mismatch.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.dt.is_nan() || self.dt.is_infinite() || self.dt <= 0.0 {
+            return Err(ConfigError(format!(
+                "dt must be finite and > 0 (got {}) — a zero/NaN/infinite step can never advance the clock",
+                self.dt
+            )));
+        }
+        if self.gravity.is_nan() || self.gravity.is_infinite() {
+            return Err(ConfigError(format!(
+                "gravity must be finite (got {})",
+                self.gravity
+            )));
+        }
+        if self.max_agents == 0 {
+            return Err(ConfigError(format!(
+                "max_agents must be >= 1 (got {})",
+                self.max_agents
+            )));
+        }
+        if !(self.world_width.is_finite() && self.world_width > 0.0) {
+            return Err(ConfigError(format!(
+                "world_width must be finite and > 0 (got {})",
+                self.world_width
+            )));
+        }
+        if !(self.world_height.is_finite() && self.world_height > 0.0) {
+            return Err(ConfigError(format!(
+                "world_height must be finite and > 0 (got {})",
+                self.world_height
+            )));
+        }
+        if self.time_scale.is_nan() || self.time_scale.is_infinite() || self.time_scale <= 0.0 {
+            return Err(ConfigError(format!(
+                "time_scale must be finite and > 0 (got {})",
+                self.time_scale
+            )));
+        }
+        if self.day_length_sim_s.is_nan()
+            || self.day_length_sim_s.is_infinite()
+            || self.day_length_sim_s <= 0.0
+        {
+            return Err(ConfigError(format!(
+                "day_length_sim_s must be finite and > 0 (got {})",
+                self.day_length_sim_s
+            )));
+        }
+        if self.foraging_threshold.is_nan()
+            || self.foraging_threshold.is_infinite()
+            || self.foraging_threshold < 0.0
+        {
+            return Err(ConfigError(format!(
+                "foraging_threshold must be finite and >= 0 (got {})",
+                self.foraging_threshold
+            )));
+        }
+        // 6.2: absurd spawn values would try to instantiate an unbuildable
+        // world (or exceed the population cap the sim enforces).
+        if self.initial_agents > self.max_agents {
+            return Err(ConfigError(format!(
+                "initial_agents ({}) exceeds max_agents ({})",
+                self.initial_agents, self.max_agents
+            )));
+        }
+        if self.initial_agents > 100_000 || self.initial_grains > 1_000_000 {
+            return Err(ConfigError(format!(
+                "absurd spawn counts: initial_agents={} initial_grains={}",
+                self.initial_agents, self.initial_grains
+            )));
+        }
+        // Obstacle boxes must be valid and live inside the arena.
+        for (i, o) in self.obstacles.iter().enumerate() {
+            let (min, max) = (o.min, o.max);
+            if min[0].is_nan()
+                || min[1].is_nan()
+                || max[0].is_nan()
+                || max[1].is_nan()
+                || max[0] <= min[0]
+                || max[1] <= min[1]
+            {
+                return Err(ConfigError(format!(
+                    "obstacle[{i}] has an invalid box min={min:?} max={max:?} — needs max > min per axis"
+                )));
+            }
+            if min[0] < 0.0
+                || min[1] < 0.0
+                || max[0] > self.world_width
+                || max[1] > self.world_height
+            {
+                return Err(ConfigError(format!(
+                    "obstacle[{i}] min={min:?} max={max:?} is outside the {world_width}x{world_height} arena",
+                    world_width = self.world_width,
+                    world_height = self.world_height,
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// 5.2: read a `simulation.toml` file. Any field the file omits falls back
     /// to the compiled default — biology constants stay in `calibration.rs`,
     /// only scenario params belong in the file (see DEVELOPMENT_PLAN §5.2).
+    /// Sprint 1: the loaded config is validated before it is returned.
     pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let s = std::fs::read_to_string(path)?;
-        Ok(toml::from_str(&s)?)
+        let cfg: Self = toml::from_str(&s)?;
+        cfg.validate()?;
+        Ok(cfg)
     }
 
     /// 5.2: serialize back to toml (used to round-trip a written file).
@@ -139,7 +272,10 @@ pub struct AgentSnapshot {
     pub age_years: f64,
     pub energy_kj: f64,
     pub hunger: f64,
-    pub fsm_state: String,
+    /// Sprint 2 (Audit 5, B20): the FSM as a compact enum discriminant.
+    /// Serde serializes unit-variant enums as their variant name string, so the
+    /// viewer JSON is unchanged from the previous `String` field.
+    pub fsm_state: components::FSMState,
     pub head_offset: [f64; 2],
     pub alarm_triggered: bool,
     /// 2.7 anomaly ground-truth label — vitality below SICK_VITALITY_THRESHOLD.
@@ -156,8 +292,8 @@ pub struct PredatorSnapshot {
     pub uid: String,
     pub pos: [f64; 2],
     pub lifetime_remaining_s: f64,
-    /// 6.2: current hunt state (Await/Chase/Catch) for the viewer.
-    pub hunt_state: String,
+    /// Sprint 2 (Audit 5, B20): hunt state as a compact enum discriminant.
+    pub hunt_state: components::PredatorHuntState,
     /// 6.2: dynamic speed tier on the 1 (slow)..5 (very fast) scale.
     pub speed_level: u8,
     /// 6.2: captures eaten so far.
@@ -178,7 +314,9 @@ pub struct SimulationSnapshot {
     pub time_us: u64,
     pub light_level: f64,
     /// 4.4: current weather state + blend intensity for the viewer.
-    pub weather: String,
+    /// Sprint 2 (Audit 5, B20): compact enum discriminant (serde encodes it as
+    /// the variant name string, so JSON is unchanged).
+    pub weather: components::Weather,
     pub weather_intensity: f64,
     pub agents: Vec<AgentSnapshot>,
     pub grains: Vec<[f64; 2]>, // Naprawiono zagnieżdżenie (Ticket R2-10)
@@ -263,21 +401,56 @@ pub struct Simulation {
 }
 
 impl Simulation {
+    /// Sprint 1 (Audit 5): fallible constructor — validates the config first
+    /// and returns a structural `ConfigError` instead of ever starting a
+    /// broken simulation. See `validate()` for the rejected invariants.
+    pub fn try_new(seed: u64, config: SimulationConfig) -> Result<Self, ConfigError> {
+        config.validate()?;
+        Ok(Self::new_unchecked(seed, config))
+    }
+
     /// Build an empty-arena simulation. `seed` is the explicit per-run seed;
     /// `config.seed` (if any) is ignored here — see `from_config`.
+    ///
+    /// Sprint 1: refuses to start with an invalid config. Prefer
+    /// `try_new`/`try_from_config` where the caller wants the error instead of
+    /// a panic.
     pub fn new(seed: u64, config: SimulationConfig) -> Self {
+        match Self::try_new(seed, config) {
+            Ok(sim) => sim,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    fn new_unchecked(seed: u64, config: SimulationConfig) -> Self {
         let (w, h) = (config.world_width as f32, config.world_height as f32);
         let mut physics = PhysicsWorld::new();
-        physics.add_wall(nalgebra::Vector2::new(0.0, 0.0), nalgebra::Vector2::new(w, 0.0));
+        // Sprint 1: SimulationConfig::dt and gravity actually reach Rapier's
+        // IntegrationParameters + gravity vector (they were hard-coded before).
+        physics.set_dt(config.dt);
+        physics.set_gravity(nalgebra::Vector2::new(0.0, config.gravity as f32));
+        physics.add_wall(
+            nalgebra::Vector2::new(0.0, 0.0),
+            nalgebra::Vector2::new(w, 0.0),
+        );
         physics.add_wall(nalgebra::Vector2::new(w, 0.0), nalgebra::Vector2::new(w, h));
         physics.add_wall(nalgebra::Vector2::new(w, h), nalgebra::Vector2::new(0.0, h));
-        physics.add_wall(nalgebra::Vector2::new(0.0, h), nalgebra::Vector2::new(0.0, 0.0));
+        physics.add_wall(
+            nalgebra::Vector2::new(0.0, h),
+            nalgebra::Vector2::new(0.0, 0.0),
+        );
 
         let mut sim = Self {
             world: World::new(),
             rng: rng::SimRng::from_seed(seed),
             time: time::SimulationTime::new(config.dt),
-            spatial_grid: spatial::SpatialHashGrid::new(2.0),
+            // Sprint 2 (Audit 5, B22): pre-size the spatial buckets to the
+            // arena area / cell² so the grid never rehashes as agents spawn in.
+            spatial_grid: spatial::SpatialHashGrid::with_capacity(
+                2.0,
+                ((config.world_width / 2.0).ceil() as usize)
+                    * ((config.world_height / 2.0).ceil() as usize),
+            ),
             physics,
             config,
             environment: EnvironmentState::default(),
@@ -320,11 +493,25 @@ impl Simulation {
     /// 5.2: construct from a toml-loaded `SimulationConfig`, using its `seed`
     /// field (falling back to 42 when absent).
     pub fn from_config(config: SimulationConfig) -> Self {
-        Self::new(config.seed.unwrap_or(42), config)
+        match Self::try_from_config(config) {
+            Ok(sim) => sim,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    /// Sprint 1 (Audit 5): fallible variant of `from_config`.
+    pub fn try_from_config(config: SimulationConfig) -> Result<Self, ConfigError> {
+        let seed = config.seed.unwrap_or(42);
+        Self::try_new(seed, config)
     }
 
     /// 4.3: register a static box obstacle (collider + data). Returns its id.
-    pub fn add_obstacle(&mut self, kind: ObstacleKind, min: Vector2<f64>, max: Vector2<f64>) -> u32 {
+    pub fn add_obstacle(
+        &mut self,
+        kind: ObstacleKind,
+        min: Vector2<f64>,
+        max: Vector2<f64>,
+    ) -> u32 {
         let id = self.obstacles.len() as u32;
         self.physics.add_obstacle(min, max);
         self.obstacles.push(Obstacle { id, kind, min, max });
@@ -336,11 +523,31 @@ impl Simulation {
     /// `Simulation::new` when `config.urban_obstacles` is set (and from
     /// `load_checkpoint` so restored runs rebuild the same map).
     pub fn build_default_obstacles(&mut self) {
-        self.add_obstacle(ObstacleKind::Building, Vector2::new(6.0, 3.0), Vector2::new(10.0, 7.0));
-        self.add_obstacle(ObstacleKind::Building, Vector2::new(16.0, 8.0), Vector2::new(21.0, 11.0));
-        self.add_obstacle(ObstacleKind::Tree, Vector2::new(13.0, 16.0), Vector2::new(14.5, 18.0));
-        self.add_obstacle(ObstacleKind::Tree, Vector2::new(25.0, 14.0), Vector2::new(26.5, 15.5));
-        self.add_obstacle(ObstacleKind::Water, Vector2::new(7.0, 12.0), Vector2::new(11.0, 13.5));
+        self.add_obstacle(
+            ObstacleKind::Building,
+            Vector2::new(6.0, 3.0),
+            Vector2::new(10.0, 7.0),
+        );
+        self.add_obstacle(
+            ObstacleKind::Building,
+            Vector2::new(16.0, 8.0),
+            Vector2::new(21.0, 11.0),
+        );
+        self.add_obstacle(
+            ObstacleKind::Tree,
+            Vector2::new(13.0, 16.0),
+            Vector2::new(14.5, 18.0),
+        );
+        self.add_obstacle(
+            ObstacleKind::Tree,
+            Vector2::new(25.0, 14.0),
+            Vector2::new(26.5, 15.5),
+        );
+        self.add_obstacle(
+            ObstacleKind::Water,
+            Vector2::new(7.0, 12.0),
+            Vector2::new(11.0, 13.5),
+        );
     }
 
     /// Phase 9 (Audit 3): re-derive the invisible building-thermal updraft
@@ -418,22 +625,23 @@ impl Simulation {
     }
 
     /// 4.3/5.2: a random point in the interior of the `w × h` arena that is NOT
-    /// inside any obstacle. Samples up to `MAX_FREE_POINT_TRIES` candidates
-    /// before giving up and returning the last (non-obstructed) draw.
+    /// inside any obstacle. Samples up to `MAX_FREE_POINT_TRIES` candidates and
+    /// returns `None` if every draw lands inside an obstacle (Sprint 2: the old
+    /// code silently fell back to the last — possibly obstructed — point, which
+    /// could pin a spawn inside a collider).
     pub fn random_free_point(
         w: f64,
         h: f64,
         obstacles: &[Obstacle],
         rng: &mut rng::SimRng,
-    ) -> Vector2<f64> {
-        let mut p = Vector2::new(0.0, 0.0);
+    ) -> Option<Vector2<f64>> {
         for _ in 0..calibration::MAX_FREE_POINT_TRIES {
-            p = Vector2::new(rng.gen_range(2.0..w - 2.0), rng.gen_range(2.0..h - 2.0));
+            let p = Vector2::new(rng.gen_range(2.0..w - 2.0), rng.gen_range(2.0..h - 2.0));
             if !Self::point_in_obstacles(obstacles, p) {
-                return p;
+                return Some(p);
             }
         }
-        p
+        None
     }
 
     /// 7.2: total energy currently held by live agents (kJ).
@@ -481,10 +689,9 @@ impl Simulation {
     /// Spawn a predator entity (2.2/2.5). Its lifetime is a random draw in
     /// `[PREDATOR_LIFETIME_MIN_S, PREDATOR_LIFETIME_MAX_S]` (2.2b).
     pub fn spawn_predator(&mut self, pos: Vector2<f64>) -> hecs::Entity {
-        let handle = self.physics.spawn_predator_body(
-            nalgebra::Vector2::new(pos.x as f32, pos.y as f32),
-            1.0,
-        );
+        let handle = self
+            .physics
+            .spawn_predator_body(nalgebra::Vector2::new(pos.x as f32, pos.y as f32), 1.0);
         let uid = self.next_uid_str();
         // 2.2b: randomized 5-15 s lifetime (config-gated for headless tests).
         let lifetime = if self.config.predator_expiry {
@@ -580,25 +787,29 @@ impl Simulation {
     }
 
     pub fn snapshot(&self) -> SimulationSnapshot {
-        // 6.1: spatial memory per entity, looked up below without growing the
-        // 10-component snapshot query tuple (hecs tuple limit).
-        let memory_by_entity: std::collections::HashMap<_, Vec<[f64; 3]>> = self
-            .world
-            .query::<&MemorySlots>()
-            .iter()
-            .map(|(id, ms)| {
-                let slots = ms
-                    .slots
-                    .iter()
-                    .map(|s| [s.pos.x, s.pos.y, s.strength])
-                    .collect();
-                (id, slots)
-            })
-            .collect();
-
+        // Sprint 2 (Audit 5, B18): the memory slots are read in the SAME query
+        // (hecs supports 15-element tuples) — the old code built a separate
+        // `HashMap<Entity, Vec<[f64;3]>>` per snapshot and then CLONED the
+        // vector again per agent, i.e. two heap copies of every memory list.
+        // FSM/hunt-state/weather now use `as_str()` instead of `format!("{:?}")`
+        // so the snapshot path performs no per-agent string formatting.
         let mut agents = Vec::new();
-        for (_id, (pos, head, vel, meta, mass, age, fsm, hb, uid, alarm)) in
-            self.world.query::<(&Position, &Heading, &Velocity, &Metabolism, &Mass, &Age, &FSMState, &HeadBob, &AgentUid, &Alarm)>().iter()
+        for (_id, (pos, head, vel, meta, mass, age, fsm, hb, uid, alarm, memory)) in self
+            .world
+            .query::<(
+                &Position,
+                &Heading,
+                &Velocity,
+                &Metabolism,
+                &Mass,
+                &Age,
+                &FSMState,
+                &HeadBob,
+                &AgentUid,
+                &Alarm,
+                &MemorySlots,
+            )>()
+            .iter()
         {
             agents.push(AgentSnapshot {
                 uid: uid.0.clone(),
@@ -609,12 +820,17 @@ impl Simulation {
                 age_years: age.years,
                 energy_kj: meta.energy_kj,
                 hunger: meta.hunger,
-                fsm_state: format!("{:?}", fsm),
+                fsm_state: *fsm,
                 head_offset: [hb.offset.x, hb.offset.y],
                 alarm_triggered: alarm.0,
                 sick: age.vitality < calibration::SICK_VITALITY_THRESHOLD,
                 vitality: age.vitality,
-                memory: memory_by_entity.get(&_id).cloned().unwrap_or_default(),
+                // 6.1: viewer memory dots — [x, y, strength] of remembered food.
+                memory: memory
+                    .slots
+                    .iter()
+                    .map(|s| [s.pos.x, s.pos.y, s.strength])
+                    .collect(),
             });
         }
 
@@ -626,12 +842,16 @@ impl Simulation {
         }
 
         let mut predators = Vec::new();
-        for (_id, (pos, pred, uid)) in self.world.query::<(&Position, &Predator, &AgentUid)>().iter() {
+        for (_id, (pos, pred, uid)) in self
+            .world
+            .query::<(&Position, &Predator, &AgentUid)>()
+            .iter()
+        {
             predators.push(PredatorSnapshot {
                 uid: uid.0.clone(),
                 pos: [pos.0.x, pos.0.y],
                 lifetime_remaining_s: pred.lifetime_remaining_s,
-                hunt_state: format!("{:?}", pred.hunt_state),
+                hunt_state: pred.hunt_state,
                 speed_level: pred.speed_level,
                 meals_eaten: pred.meals_eaten,
             });
@@ -641,28 +861,29 @@ impl Simulation {
             frame: self.time.frame,
             time_us: self.time.time_us,
             light_level: self.environment.light_level,
-            weather: format!("{:?}", self.environment.weather),
+            weather: self.environment.weather,
             weather_intensity: self.environment.weather_intensity,
             agent_count: agents.len(),
             agents,
             grains,
             predators,
-            obstacles: self.obstacles.iter().map(|o| ObstacleSnapshot {
-                id: o.id,
-                kind: o.kind,
-                min: [o.min.x, o.min.y],
-                max: [o.max.x, o.max.y],
-            }).collect(),
+            obstacles: self
+                .obstacles
+                .iter()
+                .map(|o| ObstacleSnapshot {
+                    id: o.id,
+                    kind: o.kind,
+                    min: [o.min.x, o.min.y],
+                    max: [o.max.x, o.max.y],
+                })
+                .collect(),
             dead_count: self.deaths,
         }
     }
 
     /// 3.6: write a full checkpoint (world + RNG + time + physics + counters)
     /// to `path` in bincode format. See `checkpoint::build_checkpoint`.
-    pub fn save_checkpoint(
-        &self,
-        path: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_checkpoint(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         let ckpt = checkpoint::build_checkpoint(self)?;
         let bytes = bincode::serialize(&ckpt)?;
         std::fs::write(path, bytes)?;
@@ -672,9 +893,7 @@ impl Simulation {
     /// 3.6: restore a full checkpoint written by `save_checkpoint`. The
     /// spatial grid is derived state and is rebuilt on the next tick, so it is
     /// intentionally not restored here.
-    pub fn load_checkpoint(
-        path: &str,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load_checkpoint(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let bytes = std::fs::read(path)?;
         let ckpt: checkpoint::Checkpoint = bincode::deserialize(&bytes)?;
         if ckpt.version != checkpoint::CHECKPOINT_VERSION {
@@ -724,7 +943,12 @@ impl Simulation {
         // Audit 3 (Phase 2): remap the serialized phase-2 caches through the
         // world-query ordinals (preserved 1:1 by the column round-trip).
         let mut agent_by_ord: FxHashMap<usize, hecs::Entity> = FxHashMap::default();
-        for (i, (e, _)) in sim.world.query::<(&AgentUid, &Metabolism)>().iter().enumerate() {
+        for (i, (e, _)) in sim
+            .world
+            .query::<(&AgentUid, &Metabolism)>()
+            .iter()
+            .enumerate()
+        {
             agent_by_ord.insert(i, e);
         }
         let mut grain_by_ord: FxHashMap<usize, hecs::Entity> = FxHashMap::default();
@@ -777,7 +1001,8 @@ impl Simulation {
     pub fn rebuild_spatial_grid(&mut self) {
         self.spatial_grid.clear();
         for (id, pos) in self.world.query::<&Position>().iter() {
-            if self.world.get::<&Velocity>(id).is_ok() && self.world.get::<&Metabolism>(id).is_ok() {
+            if self.world.get::<&Velocity>(id).is_ok() && self.world.get::<&Metabolism>(id).is_ok()
+            {
                 self.spatial_grid.insert(id, pos.0);
             }
         }

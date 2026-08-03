@@ -7,7 +7,9 @@
 //!     Flee,              // 2.2 — highest priority, overrides ALL
 //!     Sick,              // 2.7 — debility; a sick bird still evades a predator
 //!     CriticalEnergy,    // 2.0 — energy < threshold → force forage
-//!     NightRest,         // 2.3 — light < 0.3 → rest (stop moving, reduced drain)
+//!     Roosting,          // Audit 4 §9.5 — light < 0.3 → sleep; ~12% sentinels
+//!                        //                stay in Scanning instead (drawn from
+//!                        //                sim.rng each tick, never same birds)
 //!     Glide,             // Phase 9 — airborne in a building thermal, aligned with updraft
 //!     Preen,             // 2.6 — feathers_condition < threshold
 //!     Forage,            // existing — hunger > 0.4 (memory-biased target, 4.2)
@@ -34,12 +36,12 @@
 //!   is NO "stand still" fallback — the one condition is exactly:
 //!   "hungry AND (grain visible OR remembered food exists); otherwise Wander".
 
-use avian_core::components::*;
+use crate::search::{crw_direction, levy_step};
 use avian_core::calibration;
+use avian_core::components::*;
 use avian_core::rng::SimRng;
-use nalgebra::Vector2;
 use hecs::Entity;
-use crate::search::{levy_step, crw_direction};
+use nalgebra::Vector2;
 
 pub struct AgentContext<'a> {
     pub pos: &'a mut Position,
@@ -78,11 +80,19 @@ pub struct AgentContext<'a> {
 }
 
 #[derive(Debug)]
-pub enum BTStatus { Success, Failure, Running }
+pub enum BTStatus {
+    Success,
+    Failure,
+    Running,
+}
 
-pub trait BTNode { fn tick(&self, ctx: &mut AgentContext) -> BTStatus; }
+pub trait BTNode {
+    fn tick(&self, ctx: &mut AgentContext) -> BTStatus;
+}
 
-pub struct Sequence { children: Vec<Box<dyn BTNode>> }
+pub struct Sequence {
+    children: Vec<Box<dyn BTNode>>,
+}
 impl BTNode for Sequence {
     fn tick(&self, ctx: &mut AgentContext) -> BTStatus {
         for child in &self.children {
@@ -96,7 +106,9 @@ impl BTNode for Sequence {
     }
 }
 
-pub struct Selector { children: Vec<Box<dyn BTNode>> }
+pub struct Selector {
+    children: Vec<Box<dyn BTNode>>,
+}
 impl BTNode for Selector {
     fn tick(&self, ctx: &mut AgentContext) -> BTStatus {
         for child in &self.children {
@@ -111,19 +123,29 @@ impl BTNode for Selector {
 }
 
 pub struct Action(pub fn(&mut AgentContext) -> BTStatus);
-impl BTNode for Action { fn tick(&self, ctx: &mut AgentContext) -> BTStatus { (self.0)(ctx) } }
+impl BTNode for Action {
+    fn tick(&self, ctx: &mut AgentContext) -> BTStatus {
+        (self.0)(ctx)
+    }
+}
 
 pub struct Condition(pub fn(&AgentContext) -> bool);
 impl BTNode for Condition {
     fn tick(&self, ctx: &mut AgentContext) -> BTStatus {
-        if (self.0)(ctx) { BTStatus::Success } else { BTStatus::Failure }
+        if (self.0)(ctx) {
+            BTStatus::Success
+        } else {
+            BTStatus::Failure
+        }
     }
 }
 
 // ---- 2.2 Flee -------------------------------------------------------------
 
 fn flee_action(ctx: &mut AgentContext) -> BTStatus {
-    if !ctx.fleeing { return BTStatus::Failure; }
+    if !ctx.fleeing {
+        return BTStatus::Failure;
+    }
     *ctx.fsm = FSMState::Fleeing;
     // 4.1 flight: pigeons flee by FLYING at FLY_SPEED_MS, not a ground sprint
     // (v1 2.2 was an explicit "ground sprint at max_speed_ms" placeholder).
@@ -158,16 +180,52 @@ fn force_forage_action(ctx: &mut AgentContext) -> BTStatus {
     }
 }
 
-// ---- 2.3 NightRest --------------------------------------------------------
+// ---- Audit 4 §9.5 Roosting (night sleep + flock sentinels) ----------------
 
-fn night_rest_condition(ctx: &AgentContext) -> bool {
+/// Audit 4 §9.5: night eligibility — same light gate as the old NightRest
+/// branch (NIGHT_REST_LIGHT_THRESHOLD), which also drives the night energy
+/// drain factor in metabolism_system. Roosting sits BELOW CriticalEnergy so a
+/// genuinely starving bird still overrides sleep to forage.
+fn roosting_condition(ctx: &AgentContext) -> bool {
     ctx.light_level < calibration::NIGHT_REST_LIGHT_THRESHOLD
 }
 
-fn night_rest_action(ctx: &mut AgentContext) -> BTStatus {
-    // Stop moving; energy drain reduction is applied in metabolism_system.
-    *ctx.fsm = FSMState::Idle;
-    ctx.vel.0 = Vector2::zeros();
+fn roosting_action(ctx: &mut AgentContext) -> BTStatus {
+    // Sentinel draw: per-tick, per-eligible-agent, from the shared sim.rng.
+    // Deterministic for a fixed seed but NOT tied to agent identity — the same
+    // birds never stand guard every night. No new perception machinery: a
+    // sentinel uses the existing vision cone / cone_cast that already runs for
+    // every agent every tick.
+    let sentinel = ctx.rng.gen_range(0.0..1.0) < calibration::SENTINEL_FRACTION;
+    if sentinel {
+        // Exempted from the roosting override: stay alert and patrol slowly
+        // (Levy/CRW heading drift at a fraction of max speed).
+        *ctx.fsm = FSMState::Scanning;
+        let speed = ctx.mobility.max_speed_ms * calibration::SENTINEL_PATROL_SPEED_FRACTION;
+        if ctx.levy.remaining_dist <= 0.0 {
+            let dist = levy_step(ctx.rng, 2.0).min(5.0);
+            ctx.levy.target_heading = crw_direction(ctx.head.0, ctx.rng, 2.0);
+            ctx.levy.remaining_dist = dist;
+        } else {
+            ctx.levy.remaining_dist -= speed * ctx.dt;
+        }
+        let mut diff = ctx.levy.target_heading - ctx.head.0;
+        while diff > std::f64::consts::PI {
+            diff -= std::f64::consts::TAU;
+        }
+        while diff < -std::f64::consts::PI {
+            diff += std::f64::consts::TAU;
+        }
+        let turn_rate = ctx.mobility.max_angular_speed_rads * ctx.dt;
+        ctx.head.0 += diff.clamp(-turn_rate, turn_rate);
+        ctx.vel.0 = Vector2::new(speed * ctx.head.0.cos(), speed * ctx.head.0.sin());
+    } else {
+        // Roost: sleep in place (like Idle, but a visually/semantically
+        // distinct label). The reduced night drain is applied automatically via
+        // the light gate in metabolism_system.
+        *ctx.fsm = FSMState::Roosting;
+        ctx.vel.0 = Vector2::zeros();
+    }
     BTStatus::Running
 }
 
@@ -187,8 +245,7 @@ fn preen_action(ctx: &mut AgentContext) -> BTStatus {
     *ctx.fsm = FSMState::Preening;
     // Preening pigeons stand still; feathers are restored while doing so.
     ctx.vel.0 = Vector2::zeros();
-    ctx.feathers.0 = (ctx.feathers.0 + calibration::FEATHER_PREEN_RESTORE_RATE_S * ctx.dt)
-        .min(1.0);
+    ctx.feathers.0 = (ctx.feathers.0 + calibration::FEATHER_PREEN_RESTORE_RATE_S * ctx.dt).min(1.0);
     BTStatus::Running
 }
 
@@ -196,7 +253,8 @@ fn preen_action(ctx: &mut AgentContext) -> BTStatus {
 
 fn sick_condition(ctx: &AgentContext) -> bool {
     ctx.sick
-}fn sick_action(ctx: &mut AgentContext) -> BTStatus {
+}
+fn sick_action(ctx: &mut AgentContext) -> BTStatus {
     // Debilitated: impaired slow forage toward the nearest visible grain, else
     // a slow shuffle. The 50% velocity cut is applied in run_systems so it
     // also slows fleeing (→ more vulnerable to predators). This branch sits
@@ -276,21 +334,28 @@ fn foraging_action(ctx: &mut AgentContext) -> BTStatus {
 fn spacer_action(ctx: &mut AgentContext) -> BTStatus {
     *ctx.fsm = FSMState::Spacer;
     let speed = ctx.mobility.max_speed_ms * 0.8;
-    
+
     if ctx.levy.remaining_dist <= 0.0 {
-        let dist = levy_step(ctx.rng, 2.0).min(5.0);
+        // Audit 4 §9.8: the Lévy step cap is now WANDER_LEVY_MAX_STEP_M (15 m),
+        // not the old hardcoded 5 m — the raw heavy-tailed distribution alone
+        // still maxed at 5 m, which could never escape a cluster's gravity well.
+        let dist = levy_step(ctx.rng, 2.0).min(calibration::WANDER_LEVY_MAX_STEP_M);
         ctx.levy.target_heading = crw_direction(ctx.head.0, ctx.rng, 2.0);
         ctx.levy.remaining_dist = dist;
     } else {
         ctx.levy.remaining_dist -= speed * ctx.dt;
     }
-    
+
     let mut diff = ctx.levy.target_heading - ctx.head.0;
-    while diff > std::f64::consts::PI { diff -= std::f64::consts::TAU; }
-    while diff < -std::f64::consts::PI { diff += std::f64::consts::TAU; }
+    while diff > std::f64::consts::PI {
+        diff -= std::f64::consts::TAU;
+    }
+    while diff < -std::f64::consts::PI {
+        diff += std::f64::consts::TAU;
+    }
     let turn_rate = ctx.mobility.max_angular_speed_rads * ctx.dt;
     ctx.head.0 += diff.clamp(-turn_rate, turn_rate);
-    
+
     ctx.vel.0 = Vector2::new(speed * ctx.head.0.cos(), speed * ctx.head.0.sin());
     BTStatus::Running
 }
@@ -353,11 +418,14 @@ pub fn build_default_tree() -> Box<dyn BTNode> {
                     Box::new(Action(force_forage_action)),
                 ],
             }),
-            // 2.3 NightRest — light < 0.3 → rest.
+            // Audit 4 §9.5 Roosting — light < 0.3 → sleep in place; a fixed
+            // sentinel fraction stays in Scanning instead (drawn per-tick from
+            // sim.rng). Replaces the old NightRest branch (which merely set
+            // Idle). Below CriticalEnergy: a starving bird overrides sleep.
             Box::new(Sequence {
                 children: vec![
-                    Box::new(Condition(night_rest_condition)),
-                    Box::new(Action(night_rest_action)),
+                    Box::new(Condition(roosting_condition)),
+                    Box::new(Action(roosting_action)),
                 ],
             }),
             // Phase 9 — Glide: airborne + inside a building thermal + heading

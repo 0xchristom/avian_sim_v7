@@ -1,11 +1,10 @@
+use avian_agent::gerontology::spawn_agent;
+use avian_agent::systems::run_systems;
+use avian_core::components::{Age, AgentUid, FSMState, Heading, Metabolism, Position};
 /// 2.7 acceptance: the `sick` flag fires for low-vitality agents (vitality <
 /// 0.3), sick agents move 50% slower (including fleeing), and sick agents are
 /// captured first when a predator is present.
-
 use avian_core::{Simulation, SimulationConfig};
-use avian_core::components::{Age, AgentUid, Heading, Metabolism, Position};
-use avian_agent::systems::run_systems;
-use avian_agent::gerontology::spawn_agent;
 use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 
@@ -15,12 +14,24 @@ use nalgebra::Vector2;
 /// away in X to never appear as boids neighbors of the center agent.
 fn populate_dummies(sim: &mut Simulation) {
     let dummy_positions = [
-        [2.0, 2.0], [2.0, 19.0], [4.0, 2.0], [4.0, 19.0],
-        [28.0, 2.0], [28.0, 19.0], [30.0, 2.0], [30.0, 19.0],
+        [2.0, 2.0],
+        [2.0, 19.0],
+        [4.0, 2.0],
+        [4.0, 19.0],
+        [28.0, 2.0],
+        [28.0, 19.0],
+        [30.0, 2.0],
+        [30.0, 19.0],
     ];
     for [x, y] in dummy_positions {
         let uid = sim.next_uid_str();
-        spawn_agent(&mut sim.world, &mut sim.rng, Vector2::new(x, y), &mut sim.physics, uid);
+        spawn_agent(
+            &mut sim.world,
+            &mut sim.rng,
+            Vector2::new(x, y),
+            &mut sim.physics,
+            uid,
+        );
     }
 }
 
@@ -47,12 +58,18 @@ fn test_sick_slows_movement_and_flags() {
     // Speed of a lone center agent in an identical scene, once sick and once
     // healthy. The scene is boids-free for the center agent (8 dummies beyond
     // its query block), so the contrast isolates the 0.5 sick multiplier.
-    fn center_speed(is_sick: bool) -> (f64, String) {
+    fn center_speed(is_sick: bool) -> (f64, FSMState) {
         let mut sim = Simulation::new(11, SimulationConfig::default());
         populate_dummies(&mut sim);
         sim.spawn_grain_entity(Vector2::new(19.0, 10.5), 10);
         let uid = sim.next_uid_str();
-        let e = spawn_agent(&mut sim.world, &mut sim.rng, Vector2::new(16.0, 10.5), &mut sim.physics, uid.clone());
+        let e = spawn_agent(
+            &mut sim.world,
+            &mut sim.rng,
+            Vector2::new(16.0, 10.5),
+            &mut sim.physics,
+            uid.clone(),
+        );
         if is_sick {
             force_sick(&mut sim, e);
         } else {
@@ -66,14 +83,22 @@ fn test_sick_slows_movement_and_flags() {
         let snap = sim.snapshot();
         let agent = snap.agents.iter().find(|a| a.uid == uid).unwrap();
         let speed = (agent.vel[0].powi(2) + agent.vel[1].powi(2)).sqrt();
-        (speed, agent.fsm_state.clone())
+        (speed, agent.fsm_state)
     }
 
     let (healthy_speed, healthy_fsm) = center_speed(false);
     let (sick_speed, sick_fsm) = center_speed(true);
 
-    assert_eq!(sick_fsm, "Sick", "sick agent should be in Sick state");
-    assert_ne!(healthy_fsm, "Sick", "healthy agent should not be in Sick state");
+    assert_eq!(
+        sick_fsm,
+        avian_core::components::FSMState::Sick,
+        "sick agent should be in Sick state"
+    );
+    assert_ne!(
+        healthy_fsm,
+        avian_core::components::FSMState::Sick,
+        "healthy agent should not be in Sick state"
+    );
 
     let ratio = healthy_speed / sick_speed;
     assert!(
@@ -109,9 +134,21 @@ fn test_sick_captured_before_healthy() {
     // Both inside the 8 m detection radius → both flee; the predator chases
     // the nearest (sick), who flees at half speed → caught first.
     let uid_sick = sim.next_uid_str();
-    let e_sick = spawn_agent(&mut sim.world, &mut sim.rng, Vector2::new(13.0, 10.5), &mut sim.physics, uid_sick.clone());
+    let e_sick = spawn_agent(
+        &mut sim.world,
+        &mut sim.rng,
+        Vector2::new(13.0, 10.5),
+        &mut sim.physics,
+        uid_sick.clone(),
+    );
     let uid_healthy = sim.next_uid_str();
-    let e_healthy = spawn_agent(&mut sim.world, &mut sim.rng, Vector2::new(23.0, 10.5), &mut sim.physics, uid_healthy.clone());
+    let e_healthy = spawn_agent(
+        &mut sim.world,
+        &mut sim.rng,
+        Vector2::new(23.0, 10.5),
+        &mut sim.physics,
+        uid_healthy.clone(),
+    );
     force_sick(&mut sim, e_sick);
     force_healthy(&mut sim, e_healthy);
     // Point each away from the predator so the hawk is never in the blind spot.

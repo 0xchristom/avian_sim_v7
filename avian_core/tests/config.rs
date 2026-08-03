@@ -156,7 +156,10 @@ fn custom_obstacle_layout_blocks_los() {
         .physics
         .cast_ray_to_static(Vector2::new(9.0, 6.0), Vector2::new(1.0, 0.0), 10.0);
     let toi = hit.expect("building must occlude the ray");
-    assert!((toi - 1.0).abs() < 1e-3, "building spans x 10..14, hit at {toi}");
+    assert!(
+        (toi - 1.0).abs() < 1e-3,
+        "building spans x 10..14, hit at {toi}"
+    );
 }
 
 /// World dimensions drive the wall placement (here a 10×8 arena) — the top
@@ -173,7 +176,10 @@ fn world_dimensions_place_walls() {
         .physics
         .cast_ray_to_static(Vector2::new(5.0, 7.5), Vector2::new(0.0, 1.0), 1.0)
         .expect("top wall should exist at y=8");
-    assert!((toi - 0.5).abs() < 1e-3, "distance 0.5 up → toi 0.5, got {toi}");
+    assert!(
+        (toi - 0.5).abs() < 1e-3,
+        "distance 0.5 up → toi 0.5, got {toi}"
+    );
 
     // From a point well inside a 32×21 arena this wall would NOT be in range
     // (sanity: the default arena keeps its 21 m height).
@@ -194,10 +200,171 @@ fn from_config_uses_seed_field() {
     let mut a = Simulation::from_config(cfg.clone());
     let mut b = Simulation::new(7, cfg);
     // Same seed → identical RNG stream.
-    assert_eq!(a.rng.gen_range(0u64..1_000_000), b.rng.gen_range(0u64..1_000_000));
+    assert_eq!(
+        a.rng.gen_range(0u64..1_000_000),
+        b.rng.gen_range(0u64..1_000_000)
+    );
 
     let no_seed = SimulationConfig::default();
     let mut c = Simulation::from_config(no_seed.clone());
     let mut d = Simulation::new(42, no_seed);
-    assert_eq!(c.rng.gen_range(0u64..1_000_000), d.rng.gen_range(0u64..1_000_000));
+    assert_eq!(
+        c.rng.gen_range(0u64..1_000_000),
+        d.rng.gen_range(0u64..1_000_000)
+    );
+}
+
+// Sprint 1 (Audit 5): SimulationConfig::validate() rejects the config
+// invariants the simulation depends on, and the constructors refuse to build a
+// broken simulation.
+
+#[test]
+fn validate_rejects_zero_dt() {
+    let mut cfg = SimulationConfig::default();
+    cfg.dt = 0.0;
+    assert!(cfg.validate().is_err(), "dt == 0 must be rejected");
+    assert!(Simulation::try_new(1, cfg.clone()).is_err());
+    assert!(Simulation::try_from_config(cfg).is_err());
+}
+
+#[test]
+fn validate_rejects_nan_and_infinite_dt() {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut cfg = SimulationConfig::default();
+        cfg.dt = bad;
+        assert!(cfg.validate().is_err(), "dt={bad} must be rejected");
+    }
+}
+
+#[test]
+fn validate_rejects_bad_world_dimensions() {
+    for (w, h) in [(0.0, 21.0), (32.0, 0.0), (-5.0, 21.0), (f64::NAN, 21.0)] {
+        let mut cfg = SimulationConfig::default();
+        cfg.world_width = w;
+        cfg.world_height = h;
+        assert!(cfg.validate().is_err(), "world {w}x{h} must be rejected");
+    }
+}
+
+#[test]
+fn validate_rejects_bad_time_scale_and_day_length() {
+    let mut cfg = SimulationConfig::default();
+    cfg.time_scale = 0.0;
+    assert!(cfg.validate().is_err());
+    let mut cfg = SimulationConfig::default();
+    cfg.day_length_sim_s = 0.0;
+    assert!(cfg.validate().is_err());
+    let mut cfg = SimulationConfig::default();
+    cfg.day_length_sim_s = f64::NAN;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn validate_rejects_zero_max_agents_and_overspawn() {
+    let mut cfg = SimulationConfig::default();
+    cfg.max_agents = 0;
+    assert!(cfg.validate().is_err());
+    let mut cfg = SimulationConfig::default();
+    cfg.max_agents = 10;
+    cfg.initial_agents = 11;
+    assert!(
+        cfg.validate().is_err(),
+        "initial_agents > max_agents must fail"
+    );
+}
+
+#[test]
+fn validate_rejects_bad_obstacle_boxes() {
+    // Reversed box (max < min).
+    let mut cfg = SimulationConfig::default();
+    cfg.obstacles = vec![avian_core::ObstacleSpec {
+        kind: ObstacleKind::Building,
+        min: [10.0, 4.0],
+        max: [5.0, 8.0],
+    }];
+    assert!(cfg.validate().is_err(), "reversed box must fail");
+
+    // Box outside the arena.
+    let mut cfg = SimulationConfig::default();
+    cfg.obstacles = vec![avian_core::ObstacleSpec {
+        kind: ObstacleKind::Building,
+        min: [30.0, 4.0],
+        max: [40.0, 8.0],
+    }];
+    assert!(cfg.validate().is_err(), "out-of-arena box must fail");
+}
+
+#[test]
+fn validate_accepts_default_and_valid_custom() {
+    assert!(SimulationConfig::default().validate().is_ok());
+    let mut cfg = SimulationConfig::default();
+    cfg.dt = 1.0 / 60.0;
+    cfg.gravity = -9.81;
+    cfg.world_width = 40.0;
+    cfg.world_height = 25.0;
+    cfg.max_agents = 500;
+    cfg.initial_agents = 50;
+    assert!(cfg.validate().is_ok());
+    let sim = Simulation::try_new(1, cfg.clone()).expect("valid config builds");
+    assert!(
+        (sim.physics.dt() - 1.0 / 60.0).abs() < 1e-9,
+        "physics must use config dt"
+    );
+    assert_eq!(sim.physics.gravity.y, -9.81, "gravity must reach Rapier");
+}
+
+/// Sprint 1: non-default dt + gravity change the integration parameters and
+/// body behavior — the physics world is driven by config, not hard-coded.
+#[test]
+fn physics_uses_config_dt_and_gravity() {
+    let mut cfg = SimulationConfig::default();
+    cfg.dt = 1.0 / 60.0;
+    cfg.gravity = -9.81;
+    let mut sim = Simulation::try_new(1, cfg).expect("valid config");
+    assert!((sim.physics.dt() - 1.0 / 60.0).abs() < 1e-9);
+
+    // A dynamic body must fall under non-zero gravity after one solver step.
+    let h = sim.physics.spawn_agent_body(Vector2::new(16.0, 16.0), 0.3);
+    sim.physics.step();
+    let rb = sim.physics.get_body(h).unwrap();
+    let v = rb.linvel();
+    assert!(
+        v.y < 0.0,
+        "gravity must act on a dynamic body, got vy={}",
+        v.y
+    );
+}
+
+/// Sprint 2 (Audit 5): `random_free_point` must report failure (None) when the
+/// arena is so obstacle-dense that no free point can be found — never fall back
+/// to a point inside a collider.
+#[test]
+fn random_free_point_returns_none_when_fully_blocked() {
+    let mut sim = Simulation::new(1, SimulationConfig::default());
+    // Cover the whole arena with one obstacle so every draw is inside it.
+    let blocked = vec![avian_core::components::Obstacle {
+        id: 0,
+        kind: ObstacleKind::Building,
+        min: Vector2::new(0.0, 0.0),
+        max: Vector2::new(sim.config.world_width, sim.config.world_height),
+    }];
+    let p = Simulation::random_free_point(
+        sim.config.world_width,
+        sim.config.world_height,
+        &blocked,
+        &mut sim.rng,
+    );
+    assert!(
+        p.is_none(),
+        "fully-obstructed arena must yield None, got {:?}",
+        p
+    );
+    // A clear arena still yields Some.
+    let p2 = Simulation::random_free_point(
+        sim.config.world_width,
+        sim.config.world_height,
+        &[],
+        &mut sim.rng,
+    );
+    assert!(p2.is_some(), "empty-obstacle arena must yield a point");
 }

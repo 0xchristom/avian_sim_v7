@@ -61,6 +61,8 @@
     "vitality_at_max": 0.000058447465862950075,
     "vitality_at_t_mid": 0.5
   },
+  "sentinel_fraction": 0.12,
+  "sentinel_patrol_speed_fraction": 0.3,
   "sick_speed_multiplier": 0.5,
   "sick_vitality_threshold": 0.3,
   "thermal_depth_m": 2.5,
@@ -69,6 +71,7 @@
   "vitality_shape_p": 2.0,
   "vitality_t_mid_years": 4.0,
   "walk_speed_ms": 1.2,
+  "wander_levy_max_step_m": 15.0,
   "wild_max_lifespan_years": 15.0,
   "wind_flight_mr_multiplier": 1.5,
   "wind_speed_ms": 4.0,

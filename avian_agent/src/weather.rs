@@ -10,9 +10,9 @@
 //! scheduler never touches the RNG stream and weather stays `Clear`, so the
 //! existing deterministic scenarios keep their exact trajectories.
 
-use avian_core::Simulation;
 use avian_core::calibration;
 use avian_core::components::Weather;
+use avian_core::Simulation;
 
 /// Step the global weather forward one frame. No-op unless weather is enabled.
 pub fn update(sim: &mut Simulation) {
@@ -28,7 +28,11 @@ pub fn update(sim: &mut Simulation) {
     };
     let step = calibration::WEATHER_RAMP_RATE_PER_S * sim.config.dt;
     let i = sim.environment.weather_intensity;
-    let next = if i < target { (i + step).min(target) } else { (i - step).max(target) };
+    let next = if i < target {
+        (i + step).min(target)
+    } else {
+        (i - step).max(target)
+    };
     sim.environment.weather_intensity = next;
 
     // Re-roll the state on the fixed cadence.
