@@ -24,7 +24,6 @@ use avian_core::calibration;
 use avian_core::components::{Age, FSMState, Grain, MemorySlot, MemorySlots, Metabolism, Position};
 use avian_core::rng::SimRng;
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 use std::collections::HashMap;
 
@@ -67,14 +66,13 @@ struct ValidationStats {
 
 fn run_validation(frames: u64) -> ValidationStats {
     let mut sim = setup_validation_sim();
-    let mut exporter = TelemetryExporter::new(usize::MAX);
     let start_pool = sim.total_live_energy_kj();
     let mut fsm_counts: HashMap<String, u64> = HashMap::new();
     let mut nn_sum = 0.0;
     let mut nn_samples = 0u64;
 
     for f in 0..frames {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
 
         for (_, fsm) in sim.world.query::<&FSMState>().iter() {
             *fsm_counts.entry(format!("{:?}", fsm)).or_insert(0) += 1;
@@ -355,7 +353,6 @@ fn foraging_efficiency_improves_with_spatial_memory() {
                 .unwrap();
         }
 
-        let mut exporter = TelemetryExporter::new(usize::MAX);
         for f in 0..3000u64 {
             let before: u32 = sim
                 .world
@@ -363,7 +360,7 @@ fn foraging_efficiency_improves_with_spatial_memory() {
                 .iter()
                 .map(|(_, g)| g.amount)
                 .sum();
-            sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+            sim.step(run_systems);
             let after: u32 = sim
                 .world
                 .query::<&Grain>()

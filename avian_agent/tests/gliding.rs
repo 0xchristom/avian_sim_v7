@@ -13,7 +13,6 @@ use avian_agent::systems::run_systems;
 use avian_core::calibration;
 use avian_core::components::{Age, FSMState, FeatherCondition, Heading, Position, Velocity};
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 
 fn urban_sim(seed: u64) -> Simulation {
@@ -106,9 +105,8 @@ fn glide_state_entered_in_aligned_thermal() {
     // South thermal of building A: x∈[6,10], y∈[0.5,3.0], flow = (-1,0)=west.
     // Bird at (8,2) heading west (π) is inside + aligned → glides on frame 1.
     let e = spawn_controlled_agent(&mut sim, Vector2::new(8.0, 2.0), std::f64::consts::PI);
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
-    sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+    sim.step(run_systems);
     let fsm = *sim.world.get::<&FSMState>(e).unwrap();
     assert_eq!(
         fsm,
@@ -134,9 +132,8 @@ fn no_glide_outside_thermal() {
 
     // Far corner (top-right): no thermal anywhere near → must never glide.
     let e = spawn_controlled_agent(&mut sim, Vector2::new(25.0, 18.0), 0.0);
-    let mut exporter = TelemetryExporter::new(usize::MAX);
     for _ in 0..100 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         let fsm = *sim.world.get::<&FSMState>(e).unwrap();
         assert_ne!(
             fsm,
@@ -181,9 +178,8 @@ fn gliding_drains_less_energy_than_ground_locomotion() {
         sim.environment.time_of_day_hours = 12.0;
         sim.environment.sun_heading = -std::f64::consts::FRAC_PI_2;
         spawn_controlled_agent(&mut sim, pos, heading);
-        let mut exporter = TelemetryExporter::new(usize::MAX);
         for _ in 0..60 {
-            sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+            sim.step(run_systems);
         }
         sim.total_energy_expenditure_kj
     };

@@ -3,7 +3,6 @@ members = [
     "avian_core",
     "avian_physics",
     "avian_agent",
-    "avian_telemetry",
 ]
 resolver = "2"
 

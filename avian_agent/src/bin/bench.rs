@@ -3,13 +3,12 @@
 //! Run in release mode:
 //!   cargo run --release -p avian_agent --bin bench -- agents 30 7200
 //!   cargo run --release -p avian_agent --bin bench -- agents 500 3600
-//!   cargo run --release -p avian_agent --bin bench -- export 100000
 //!   cargo run --release -p avian_agent --bin bench -- snapshot 500 3600
 //!   cargo run --release -p avian_agent --bin bench -- checkpoint 500 1200
 //!
 //! Targets (plan 7.3): 30 agents @120fps <1ms/frame; 500 agents @60fps
-//! <5ms/frame; 100k telemetry frames exported in <30s. This measurement gates
-//! 5.3 (custom physics) and drives 5.6 (caching) and 6.6 (render opts).
+//! <5ms/frame. This measurement gates 5.3 (custom physics) and drives 5.6
+//! (caching) and 6.6 (render opts).
 //!
 //! Sprint 5 (tech task 6): structured performance counters — `snapshot` splits
 //! the server broadcast path into sim-step / snapshot-build / JSON-serialize
@@ -20,7 +19,6 @@ use avian_agent::gerontology::spawn_agent;
 use avian_agent::systems::{run_systems, spawn_grain};
 use avian_core::{Simulation, SimulationConfig};
 use avian_physics::PhysicsWorld;
-use avian_telemetry::exporter::{TelemetryExporter, TelemetryFrame};
 use nalgebra::Vector2;
 use std::time::Instant;
 
@@ -31,10 +29,6 @@ fn main() {
             let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
             let frames: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(7200);
             bench_agents(n, frames);
-        }
-        Some("export") => {
-            let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100_000);
-            bench_export(n);
         }
         Some("phys") => {
             let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(500);
@@ -52,7 +46,7 @@ fn main() {
             bench_checkpoint(n, frames);
         }
         _ => {
-            eprintln!("usage: bench <agents N frames | export N | phys N frames | snapshot N frames | checkpoint N frames>");
+            eprintln!("usage: bench <agents N frames | phys N frames | snapshot N frames | checkpoint N frames>");
             std::process::exit(2);
         }
     }
@@ -60,13 +54,6 @@ fn main() {
 
 fn bench_agents(n: usize, frames: u64) {
     let mut sim = Simulation::new(42, SimulationConfig::default());
-    // Audit 3 (Phase 1): `BENCH_DISABLED=1` measures the pure simulation cost
-    // with telemetry fully inert (the intended headless/paused-RLHF mode).
-    let mut exporter = if std::env::var("BENCH_DISABLED").is_ok() {
-        TelemetryExporter::disabled()
-    } else {
-        TelemetryExporter::new(usize::MAX)
-    };
     for _ in 0..n {
         let x = sim.rng.gen_range(2.0..30.0);
         let y = sim.rng.gen_range(2.0..19.0);
@@ -103,12 +90,12 @@ fn bench_agents(n: usize, frames: u64) {
 
     // Warmup (physics/scheduler JIT-ish effects, allocator caches).
     for _ in 0..300 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
     }
 
     let t0 = Instant::now();
     for _ in 0..frames {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
     }
     let dt = t0.elapsed().as_secs_f64();
     let ms_per_frame = dt * 1000.0 / frames as f64;
@@ -137,7 +124,6 @@ fn bench_agents(n: usize, frames: u64) {
 /// alone hides (B12: snapshot + JSON per client tick).
 fn bench_snapshot(n: usize, frames: u64) {
     let mut sim = Simulation::new(42, SimulationConfig::default());
-    let mut exporter = TelemetryExporter::disabled();
     for _ in 0..n {
         let x = sim.rng.gen_range(2.0..30.0);
         let y = sim.rng.gen_range(2.0..19.0);
@@ -158,7 +144,7 @@ fn bench_snapshot(n: usize, frames: u64) {
 
     // Warmup (allocator caches + spatial grid steady state).
     for _ in 0..300 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
     }
 
     let mut sim_ms = 0.0;
@@ -167,7 +153,7 @@ fn bench_snapshot(n: usize, frames: u64) {
     let mut payload_bytes = 0usize;
     for _ in 0..frames {
         let t0 = Instant::now();
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         sim_ms += t0.elapsed().as_secs_f64();
 
         let t1 = Instant::now();
@@ -197,7 +183,6 @@ fn bench_snapshot(n: usize, frames: u64) {
 /// on the simulation, and the release gate wants a concrete number.
 fn bench_checkpoint(n: usize, frames: u64) {
     let mut sim = Simulation::new(42, SimulationConfig::default());
-    let mut exporter = TelemetryExporter::disabled();
     for _ in 0..n {
         let x = sim.rng.gen_range(2.0..30.0);
         let y = sim.rng.gen_range(2.0..19.0);
@@ -216,7 +201,7 @@ fn bench_checkpoint(n: usize, frames: u64) {
         spawn_grain(&mut sim, Vector2::new(x, y), 10);
     }
     for _ in 0..frames {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
     }
 
     let dir = std::env::temp_dir();
@@ -259,46 +244,4 @@ fn bench_physics(n: usize, frames: u64) {
     let dt = t0.elapsed().as_secs_f64();
     let ms_per_frame = dt * 1000.0 / frames as f64;
     println!("physics-only {n} bodies: {ms_per_frame:.3} ms/frame");
-}
-
-fn bench_export(n: usize) {
-    let frame = |i: usize| TelemetryFrame {
-        time_us: i as u64 * 8333,
-        frame: i as u32,
-        uid: format!("A{:04}-{:06}", 1, i % 1000),
-        obs: (0..128).map(|k| ((k + i) % 7) as f32 * 0.1).collect(),
-        reward: 0.1,
-        alarm_triggered: false,
-        sick: false,
-        reward_grain: 0.0,
-        reward_flocking: 0.0,
-        reward_starvation: 0.0,
-        reward_captured: 0.0,
-        reward_flee_success: 0.0,
-        fsm: "Spacer".into(),
-        event_labels: vec![],
-        next_fsm: String::new(),
-    };
-
-    let t0 = Instant::now();
-    let mut exporter = TelemetryExporter::new(usize::MAX);
-    let dir = std::env::temp_dir();
-    let path = dir.join("bench_export.csv");
-    exporter.open(&path).expect("open export file");
-    for i in 0..n {
-        exporter.push(frame(i));
-    }
-    exporter.finish();
-    let dt = t0.elapsed().as_secs_f64();
-    let throughput = n as f64 / dt;
-    println!("export {n} frames in {dt:.2}s: {throughput:.0} frames/s");
-    println!(
-        "target 100k < 30s: {}",
-        if n >= 100_000 && dt < 30.0 {
-            "PASS"
-        } else {
-            "FAIL"
-        }
-    );
-    let _ = std::fs::remove_file(&path);
 }

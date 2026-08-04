@@ -2,9 +2,7 @@ use avian_agent::gerontology::spawn_agent;
 use avian_agent::metrics::compute_metrics;
 use avian_agent::scripted_population::ScriptedGrowth;
 use avian_agent::systems::{run_systems, spawn_grain};
-use avian_core::calibration;
 use avian_core::events::Event;
-use avian_telemetry::{write_metadata, Format, TelemetryExporter, TelemetryMetadata};
 use std::net::TcpListener;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,7 +28,7 @@ fn send_error_is_fatal(err: &tungstenite::Error) -> bool {
 }
 
 fn main() {
-    // Parse CLI args: --headless [--frames N] [--output path] [--events-file path] [--seed N]
+    // Parse CLI args: --headless [--frames N] [--events-file path] [--seed N]
     let args: Vec<String> = std::env::args().collect();
     let headless = args.iter().any(|a| a == "--headless");
     // 4.3: opt-in urban map (buildings/trees/water + line-of-sight occlusion).
@@ -46,32 +44,19 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(0); // 0 = unlimited
-                       // Per-run seed — metadata.json is designed to track this per run.
+                       // Per-run seed — drives deterministic scenario replay.
     let seed: u64 = args
         .iter()
         .position(|a| a == "--seed")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(42);
-    // Telemetry file output is opt-in via `--output <path>`. Without it the
-    // server runs without writing any dataset, so it never grows a dataset.csv.
-    let output_path = args
-        .iter()
-        .position(|a| a == "--output")
-        .and_then(|i| args.get(i + 1))
-        .map(|s| s.to_string());
+    // 2.5: pre-recorded event schedule for headless scenario replay.
     let events_file = args
         .iter()
         .position(|a| a == "--events-file")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.to_string());
-    // 3.4: export format. `--format jsonl` for the lossless debug format.
-    let format = args
-        .iter()
-        .position(|a| a == "--format")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|s| Format::parse(s))
-        .unwrap_or(Format::Csv);
     // 5.2: base scenario from a `simulation.toml` file. CLI flags below override
     // the file on collision (explicit command line wins over a file default).
     let config_path = args
@@ -120,59 +105,6 @@ fn main() {
     }
 
     let mut sim = avian_core::Simulation::from_config(config.clone());
-    // 6.2: no telemetry is generated unless `--output` is supplied. Without an
-    // output target the exporter is inert — no frames collected, none written.
-    let mut exporter = if output_path.is_some() {
-        TelemetryExporter::new(usize::MAX)
-    } else {
-        TelemetryExporter::disabled()
-    };
-
-    // 3.4: output path carries the format extension (only set with --output).
-    let ext = format.extension();
-    let out_path = output_path.as_deref().map(|op| {
-        if op.ends_with(".csv") || op.ends_with(".jsonl") {
-            let trimmed = op.trim_end_matches(".csv").trim_end_matches(".jsonl");
-            format!("{trimmed}.{ext}")
-        } else {
-            op.to_string()
-        }
-    });
-
-    // Telemetry file is only opened when --output is supplied.
-    if let Some(out) = &out_path {
-        // Fix #8: Open telemetry file at startup — stream to disk, no data loss
-        exporter
-            .open_with_format(std::path::Path::new(out), format)
-            .expect("Failed to open telemetry file");
-        // 2.5: side-car event log for ground-truth annotations.
-        let events_out = out.replace(&format!(".{ext}"), ".events.jsonl");
-        exporter
-            .open_event_log(std::path::Path::new(&events_out))
-            .ok();
-    }
-
-    // 3.7: dataset metadata (schema authority) written up front; reward stats
-    // and sim_frames are patched in at end of run.
-    let mut metadata = TelemetryMetadata::new(
-        seed,
-        serde_json::to_value(&config).unwrap_or(serde_json::json!({})),
-        30,
-        [calibration::WORLD_WIDTH_M, calibration::WORLD_HEIGHT_M],
-        events_file
-            .clone()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|c| c.lines().map(|l| l.to_string()).collect())
-            .unwrap_or_default(),
-        0,
-        None,
-    );
-    let meta_path = out_path
-        .as_deref()
-        .map(|out| out.replace(&format!(".{ext}"), ".metadata.json"));
-    if let Some(mp) = &meta_path {
-        let _ = write_metadata(std::path::Path::new(mp), &metadata);
-    }
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -235,20 +167,19 @@ fn main() {
     // Fix #3: Headless mode — run simulation without any client
     if headless {
         println!(
-            "Headless mode: running {} frames, output to {}",
+            "Headless mode: running {} frames",
             if frames_target == 0 {
                 "unlimited".to_string()
             } else {
                 frames_target.to_string()
-            },
-            out_path.as_deref().unwrap_or("(no telemetry file)")
+            }
         );
         let mut frame: u64 = 0;
         while running.load(Ordering::SeqCst) {
             if frames_target > 0 && frame >= frames_target {
                 break;
             }
-            sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+            sim.step(run_systems);
             frame += 1;
             // Audit 5a item 2: scripted growth is checked once per tick, keyed
             // on sim-time (frame × dt), so it stays correct at any speed.
@@ -260,27 +191,14 @@ fn main() {
             }
             if frame.is_multiple_of(1000) {
                 println!(
-                    "Frame {} — agents: {}, grains: {}, telemetry frames: {}",
+                    "Frame {} — agents: {}, grains: {}",
                     frame,
                     sim.snapshot().agents.len(),
-                    sim.snapshot().grains.len(),
-                    exporter.frame_count()
+                    sim.snapshot().grains.len()
                 );
             }
         }
-        println!(
-            "Headless run complete. {} frames, {} telemetry frames written to {}",
-            frame,
-            exporter.frame_count(),
-            out_path.as_deref().unwrap_or("(telemetry disabled)")
-        );
-        // 3.4/3.7: flush pending `next_fsm` frames + finalize metadata.
-        exporter.finish();
-        metadata.sim_frames = frame;
-        metadata.reward_stats = exporter.reward_stats();
-        if let Some(mp) = &meta_path {
-            let _ = write_metadata(std::path::Path::new(mp), &metadata);
-        }
+        println!("Headless run complete. {} frames", frame);
         return;
     }
 
@@ -322,7 +240,7 @@ fn main() {
         let do_step = !paused || pending_step;
         pending_step = false;
         if do_step {
-            sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+            sim.step(run_systems);
             frame += 1;
             // Audit 5a item 2: scripted growth check once per tick (sim-time).
             if config.scripted_population {
@@ -372,7 +290,7 @@ fn main() {
                                         continue;
                                     }
                                 }
-                                // 2.5: JSON events from the RLHF controller
+                                // 2.5: scenario events from the viewer
                                 // (`{"event":"spawn_predator",...}`).
                                 if let Ok(ev) = serde_json::from_str::<Event>(&text) {
                                     pending_events.push(ev.clone());
@@ -487,17 +405,5 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_secs_f64(
             16.0 / 1000.0 / sim.config.time_scale / speed,
         ));
-    }
-
-    println!(
-        "Shutting down. {} telemetry frames written to {}",
-        exporter.frame_count(),
-        out_path.as_deref().unwrap_or("(telemetry disabled)")
-    );
-    exporter.finish();
-    metadata.sim_frames = frame;
-    metadata.reward_stats = exporter.reward_stats();
-    if let Some(mp) = &meta_path {
-        let _ = write_metadata(std::path::Path::new(mp), &metadata);
     }
 }

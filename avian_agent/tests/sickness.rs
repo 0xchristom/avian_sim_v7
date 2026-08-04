@@ -5,7 +5,6 @@ use avian_core::components::{Age, AgentUid, FSMState, Heading, Metabolism, Posit
 /// 0.3), sick agents move 50% slower (including fleeing), and sick agents are
 /// captured first when a predator is present.
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 
 /// Pre-populate the world to MIN_POPULATION (10) with dummy agents placed
@@ -78,8 +77,7 @@ fn test_sick_slows_movement_and_flags() {
         face(&mut sim, e, Vector2::new(19.0, 10.5));
         sim.world.get::<&mut Metabolism>(e).unwrap().energy_kj = 3.0;
 
-        let mut exporter = TelemetryExporter::new(usize::MAX);
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         let snap = sim.snapshot();
         let agent = snap.agents.iter().find(|a| a.uid == uid).unwrap();
         let speed = (agent.vel[0].powi(2) + agent.vel[1].powi(2)).sqrt();
@@ -156,12 +154,11 @@ fn test_sick_captured_before_healthy() {
     face(&mut sim, e_healthy, Vector2::new(30.0, 10.5));
     sim.spawn_predator(Vector2::new(16.0, 10.5));
 
-    let mut exporter = TelemetryExporter::new(usize::MAX);
     let alive = vec![uid_sick.clone(), uid_healthy.clone()];
     let mut first_captured: Option<String> = None;
 
     for _ in 0..6000 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         let now_alive: Vec<String> = sim
             .world
             .query::<&AgentUid>()

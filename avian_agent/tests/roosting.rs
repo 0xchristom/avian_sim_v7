@@ -12,7 +12,6 @@ use avian_agent::systems::run_systems;
 use avian_core::calibration;
 use avian_core::components::{Age, FSMState, FeatherCondition, Metabolism};
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 
 const POPULATION: usize = 30;
@@ -61,9 +60,8 @@ fn count_states(sim: &Simulation) -> (usize, usize) {
 #[test]
 fn night_flock_roosts_with_sentinel_fraction() {
     let mut sim = night_sim(7);
-    let mut exporter = TelemetryExporter::new(usize::MAX);
     for _ in 0..10 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
     }
     let (roosting, scanning) = count_states(&sim);
     let total = roosting + scanning;
@@ -102,9 +100,8 @@ fn daytime_never_roosts_or_sentinels() {
         uid,
     );
     sim.world.get::<&mut Metabolism>(e).unwrap().energy_kj = 60.0;
-    let mut exporter = TelemetryExporter::new(usize::MAX);
     for _ in 0..10 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         let fsm = *sim.world.get::<&FSMState>(e).unwrap();
         assert_ne!(fsm, FSMState::Roosting, "a noon bird must not roost");
         assert_ne!(
@@ -117,9 +114,8 @@ fn daytime_never_roosts_or_sentinels() {
 
 fn sentinel_set(seed: u64) -> Vec<bool> {
     let mut sim = night_sim(seed);
-    let mut exporter = TelemetryExporter::new(usize::MAX);
     for _ in 0..3 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
     }
     // hecs QueryBorrow has a Drop impl — bind to a let so it drops before `sim`.
     let out: Vec<bool> = sim

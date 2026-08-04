@@ -19,7 +19,6 @@ use avian_agent::systems::run_systems;
 use avian_core::calibration;
 use avian_core::components::{Age, Heading, LevyState, Position, Velocity};
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use hecs::Entity;
 use nalgebra::Vector2;
 
@@ -44,13 +43,12 @@ fn lone_bird(pos: Vector2<f64>, heading: f64, seed: u64) -> (Simulation, Entity)
 #[test]
 fn bird_heading_into_wall_turns_away() {
     let (mut sim, e) = lone_bird(Vector2::new(1.5, 10.5), std::f64::consts::PI, 3);
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     let mut x_min = f64::MAX;
     let mut moved_interior = 0u32;
     let mut stuck_sliding_frames = 0u32;
     for _ in 0..600 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         let pos = sim.world.get::<&Position>(e).unwrap().0;
         let vel = sim.world.get::<&Velocity>(e).unwrap().0;
         x_min = x_min.min(pos.x);
@@ -90,12 +88,11 @@ fn bird_heading_into_wall_turns_away() {
 fn bird_heading_into_top_wall_turns_away() {
     let h = 21.0; // default world_height
     let (mut sim, e) = lone_bird(Vector2::new(16.0, h - 1.5), std::f64::consts::FRAC_PI_2, 11);
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     let mut y_max = f64::MIN;
     let mut moved_interior = 0u32;
     for _ in 0..600 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         let pos = sim.world.get::<&Position>(e).unwrap().0;
         let vel = sim.world.get::<&Velocity>(e).unwrap().0;
         y_max = y_max.max(pos.y);

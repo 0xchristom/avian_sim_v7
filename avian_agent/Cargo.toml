@@ -12,7 +12,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 avian_core = { path = "../avian_core" }
 avian_physics = { path = "../avian_physics" }
-avian_telemetry = { path = "../avian_telemetry" }
 tungstenite = { workspace = true }
 rustc-hash = { workspace = true }
 ctrlc = { workspace = true } # Dodano brakującą zależność

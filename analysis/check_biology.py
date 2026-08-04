@@ -129,18 +129,6 @@ def _(c: dict) -> list[str]:
     return errs
 
 
-@check("reward sign conventions")
-def _(c: dict) -> list[str]:
-    errs = []
-    if not c["reward_grain"] > 0.0:
-        errs.append("grain reward must be positive")
-    if not c["reward_captured"] < 0.0:
-        errs.append("capture reward must be negative")
-    if not c["reward_flee_success"] > 0.0:
-        errs.append("flee-success reward must be positive")
-    return errs
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description="Validate biology constants (6.3).")
     ap.add_argument("--strict", action="store_true", help="exit 1 on any failed check")

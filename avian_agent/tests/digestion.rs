@@ -20,7 +20,6 @@ use avian_core::calibration;
 use avian_core::components::{FSMState, Mass, Metabolism, Position, Velocity};
 use avian_core::time::SimulationTime;
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use hecs::World;
 use nalgebra::Vector2;
 
@@ -149,11 +148,10 @@ fn bird_becomes_hungry_again_after_its_crop_drains() {
         meta.hunger = 0.2;
         meta.energy_kj = 45.0;
     }
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     let mut became_hungry = false;
     for _ in 0..(5 * 60 * 120) {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         let meta = sim.world.get::<&Metabolism>(e).unwrap();
         if meta.hunger >= calibration::FORAGING_HUNGER_THRESHOLD {
             became_hungry = true;

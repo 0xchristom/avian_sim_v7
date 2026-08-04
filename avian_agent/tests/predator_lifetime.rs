@@ -5,7 +5,6 @@ use avian_agent::systems::run_systems;
 use avian_core::components::Predator;
 use avian_core::events::Event;
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 
 #[test]
@@ -20,11 +19,10 @@ fn test_predator_expires_within_5_15s_and_logs_event() {
         },
     );
     sim.spawn_predator(Vector2::new(16.0, 10.5));
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     let mut expiry_frame: Option<u32> = None;
     for frame in 0..=15 * 120 + 10 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         if sim.world.query::<&Predator>().iter().next().is_none() {
             expiry_frame = Some(frame);
             break;
@@ -60,9 +58,8 @@ fn test_predator_lifetime_visible_in_snapshot() {
         },
     );
     sim.spawn_predator(Vector2::new(16.0, 10.5));
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
-    sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+    sim.step(run_systems);
     let snap = sim.snapshot();
     assert_eq!(snap.predators.len(), 1);
     let p = &snap.predators[0];
@@ -74,7 +71,7 @@ fn test_predator_lifetime_visible_in_snapshot() {
 
     // After ~2 s of stepping, the countdown decreased.
     for _ in 0..240 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
     }
     let snap2 = sim.snapshot();
     if let Some(p2) = snap2.predators.first() {

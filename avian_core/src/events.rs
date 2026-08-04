@@ -1,4 +1,4 @@
-//! Event Injection API (2.5) — RLHF environment control.
+//! Event Injection API (2.5) — live scenario control from the viewer.
 //!
 //! Wire format: internally-tagged enum, so each variant serializes as
 //! `{"event":"spawn_grain","pos":[x,y],"count":N}` etc. This is option (b)

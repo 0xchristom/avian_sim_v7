@@ -50,7 +50,6 @@ version = "0.1.0"
 dependencies = [
  "avian_core",
  "avian_physics",
- "avian_telemetry",
  "bincode",
  "ctrlc",
  "hecs",
@@ -89,15 +88,6 @@ dependencies = [
  "nalgebra",
  "rapier2d",
  "serde",
-]
-
-[[package]]
-name = "avian_telemetry"
-version = "0.1.0"
-dependencies = [
- "avian_core",
- "serde",
- "serde_json",
 ]
 
 [[package]]

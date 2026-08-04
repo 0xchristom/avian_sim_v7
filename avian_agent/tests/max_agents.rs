@@ -4,7 +4,6 @@
 
 use avian_agent::systems::run_systems;
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 
 /// Immigration tops the flock back up to `MIN_POPULATION` when it dips below
 /// it. With `max_agents` set BELOW `MIN_POPULATION`, the respawn loop must be
@@ -18,7 +17,6 @@ fn immigration_never_exceeds_max_agents() {
         ..SimulationConfig::default()
     };
     let mut sim = Simulation::new(11, config);
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     let live = |sim: &Simulation| {
         sim.world
@@ -35,7 +33,7 @@ fn immigration_never_exceeds_max_agents() {
     );
 
     for _ in 0..500 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         assert!(
             live(&sim) <= 5,
             "live population exceeded max_agents=5: {}",
@@ -55,10 +53,9 @@ fn immigration_reaches_min_population_when_cap_is_high() {
         ..SimulationConfig::default()
     };
     let mut sim = Simulation::new(12, config);
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     for _ in 0..200 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
     }
     let live = sim
         .world

@@ -8,7 +8,6 @@ use avian_agent::systems::run_systems;
 use avian_core::components::{Age, AgentUid, Position};
 use avian_core::events::Event;
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 
 /// Pre-populate the world to MIN_POPULATION (10) with dummy agents placed far
@@ -90,10 +89,9 @@ fn test_predator_despawns_after_three_meals() {
         sim.world.get::<&AgentUid>(e).unwrap().0.clone()
     };
 
-    let mut exporter = TelemetryExporter::new(usize::MAX);
     let mut despawned = false;
     for _ in 0..15000 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         if sim
             .world
             .query::<&avian_core::components::Predator>()

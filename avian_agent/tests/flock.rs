@@ -20,7 +20,6 @@ use avian_agent::gerontology::spawn_agent;
 use avian_agent::systems::run_systems;
 use avian_core::components::{FSMState, Mobility, Position, Velocity};
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 
 /// Spawn `n` birds at `x_offsets` meters apart on the same row, no grains, no
@@ -48,14 +47,13 @@ fn flock_sim(n: usize, x_offsets: &[f64], seed: u64) -> Simulation {
 #[test]
 fn birds_8m_apart_are_not_glued_together() {
     let mut sim = flock_sim(2, &[0.0, 8.0], 42);
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     let mut min_sep = f64::MAX;
     let mut max_sep = f64::MIN;
     let mut sep_sum = 0.0;
     let mut samples = 0u64;
     for _ in 0..2000 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         let positions: Vec<Vector2<f64>> = sim
             .world
             .query::<&Position>()
@@ -92,10 +90,9 @@ fn birds_8m_apart_are_not_glued_together() {
 #[test]
 fn non_fleeing_velocity_is_clamped_to_max_speed() {
     let mut sim = flock_sim(2, &[0.0, 2.0], 7); // 2 m apart → boids active
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     for _ in 0..600 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         for (_, (fsm, vel, mob)) in sim
             .world
             .query::<(&FSMState, &Velocity, &Mobility)>()
@@ -122,11 +119,10 @@ fn non_fleeing_velocity_is_clamped_to_max_speed() {
 fn roosting_birds_receive_no_boids_steering() {
     let mut sim = flock_sim(2, &[0.0, 2.0], 99);
     sim.environment.time_of_day_hours = 0.0; // midnight → night roost
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     let mut roost_frames = 0u64;
     for _ in 0..300 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         for (_, (fsm, vel)) in sim.world.query::<(&FSMState, &Velocity)>().iter() {
             if *fsm == FSMState::Roosting {
                 roost_frames += 1;

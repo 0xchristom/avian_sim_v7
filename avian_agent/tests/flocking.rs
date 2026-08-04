@@ -4,7 +4,6 @@
 use avian_agent::gerontology::spawn_agent;
 use avian_agent::systems::run_systems;
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 
 fn setup_flock_sim() -> Simulation {
@@ -46,12 +45,11 @@ fn max_local_flock(snap: &avian_core::SimulationSnapshot) -> usize {
 #[test]
 fn test_flocks_form_within_1000_frames() {
     let mut sim = setup_flock_sim();
-    let mut exporter = TelemetryExporter::new(usize::MAX);
     let mut formed = false;
     let mut frame = 0u32;
 
     for _ in 0..1000 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         frame = sim.time.frame;
         if max_local_flock(&sim.snapshot()) >= 4 {
             formed = true;

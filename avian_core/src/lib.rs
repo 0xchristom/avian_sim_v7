@@ -291,7 +291,7 @@ pub struct AgentSnapshot {
     pub alarm_triggered: bool,
     /// 2.7 anomaly ground-truth label — vitality below SICK_VITALITY_THRESHOLD.
     pub sick: bool,
-    /// 4.0 vitality (obs_v1 input, 3.1) — monotonic Weibull decay model.
+    /// 4.0 vitality — monotonic Weibull decay model.
     pub vitality: f64,
     /// 6.1: remembered food locations as `[x, y, strength]` (viewer memory
     /// dots). Strength fades toward 0 as the memory decays (4.2).
@@ -734,10 +734,10 @@ impl Simulation {
         ))
     }
 
-    /// 2.5: inject an RLHF control event. Each event is logged with the current
-    /// frame so it appears as a ground-truth annotation in telemetry, and with
-    /// its application result (Sprint 5): an event that matched nothing (no-op)
-    /// is recorded as `NoOp`, never reported as success.
+    /// 2.5: inject a live scenario event (from the viewer). Each event is
+    /// logged with the current frame and its application result (Sprint 5): an
+    /// event that matched nothing (no-op) is recorded as `NoOp`, never reported
+    /// as success.
     pub fn inject_event(&mut self, event: Event) -> events::EventOutcome {
         let frame = self.time.frame;
         let outcome = self.apply_event(&event);

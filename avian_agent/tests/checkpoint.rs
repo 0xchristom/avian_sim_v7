@@ -13,7 +13,6 @@ use avian_agent::systems::{run_systems, spawn_grain};
 use avian_core::checkpoint::{deserialize_world, serialize_world};
 use avian_core::components::{AgentUid, FSMState, Metabolism, Position};
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use hecs::World;
 use nalgebra::Vector2;
 use std::any::TypeId;
@@ -98,9 +97,8 @@ fn fingerprint(sim: &Simulation) -> String {
 #[test]
 fn test_checkpoint_roundtrip_preserves_state() {
     let mut sim = setup_sim();
-    let mut exporter = TelemetryExporter::new(usize::MAX);
     for _ in 0..300 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
     }
 
     let path = std::env::temp_dir().join("avian_ckpt_roundtrip.bin");
@@ -139,10 +137,9 @@ fn test_checkpoint_roundtrip_preserves_state() {
     // Physics bodies must be restored: positions actually integrate when the
     // restored sim steps (bodies exist and move), not silently missing.
     let before = fingerprint(&restored);
-    let mut exporter2 = TelemetryExporter::new(usize::MAX);
     let mut restored = restored;
     for _ in 0..50 {
-        restored.step(|s, dt| run_systems(s, dt, &mut exporter2));
+        restored.step(run_systems);
     }
     assert_ne!(
         before,
@@ -162,16 +159,14 @@ fn test_checkpoint_determinism_continuation() {
 
     // Live run: full N frames in one go.
     let mut live = setup_sim();
-    let mut exporter_live = TelemetryExporter::new(usize::MAX);
     for _ in 0..TOTAL {
-        live.step(|s, dt| run_systems(s, dt, &mut exporter_live));
+        live.step(run_systems);
     }
 
     // Checkpointed run: run to SPLIT, save, restore, continue to TOTAL.
     let mut ckpt_sim = setup_sim();
-    let mut exporter_ckpt = TelemetryExporter::new(usize::MAX);
     for _ in 0..SPLIT {
-        ckpt_sim.step(|s, dt| run_systems(s, dt, &mut exporter_ckpt));
+        ckpt_sim.step(run_systems);
     }
     let path = std::env::temp_dir().join("avian_ckpt_det.bin");
     let p = path.to_str().unwrap().to_string();
@@ -179,9 +174,8 @@ fn test_checkpoint_determinism_continuation() {
     drop(ckpt_sim);
 
     let mut restored = Simulation::load_checkpoint(&p).expect("load checkpoint");
-    let mut exporter_rest = TelemetryExporter::new(usize::MAX);
     for _ in SPLIT..TOTAL {
-        restored.step(|s, dt| run_systems(s, dt, &mut exporter_rest));
+        restored.step(run_systems);
     }
 
     // Every agent state + every counter must be identical to the live run.
@@ -261,9 +255,8 @@ fn test_checkpoint_registers_every_spawned_component() {
 #[test]
 fn test_checkpoint_truncated_file_errors() {
     let mut sim = setup_sim();
-    let mut exporter = TelemetryExporter::new(usize::MAX);
     for _ in 0..200 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
     }
 
     let path = std::env::temp_dir().join("avian_ckpt_trunc.bin");
@@ -308,9 +301,8 @@ fn test_checkpoint_truncated_file_errors() {
 #[test]
 fn test_checkpoint_interrupted_write_keeps_last_valid() {
     let mut sim = setup_sim();
-    let mut exporter = TelemetryExporter::new(usize::MAX);
     for _ in 0..200 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
     }
 
     let path = std::env::temp_dir().join("avian_ckpt_atomic.bin");

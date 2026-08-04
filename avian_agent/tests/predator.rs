@@ -5,7 +5,6 @@ use avian_agent::gerontology::spawn_agent;
 use avian_agent::systems::run_systems;
 use avian_core::components::{AgentUid, Alarm};
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 use std::collections::HashSet;
 
@@ -45,14 +44,13 @@ fn setup_predator_sim() -> Simulation {
 #[test]
 fn test_predator_triggers_fleeing_and_captures() {
     let mut sim = setup_predator_sim();
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     let mut ever_seen: HashSet<String> = HashSet::new();
     let mut ever_fled: HashSet<String> = HashSet::new();
     let mut captured = false;
 
     for _ in 0..10000 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         // Cheap per-frame alarm scan (avoids a full snapshot).
         for (_, (uid, alarm)) in sim.world.query::<(&AgentUid, &Alarm)>().iter() {
             ever_seen.insert(uid.0.clone());

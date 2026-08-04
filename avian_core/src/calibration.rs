@@ -370,7 +370,7 @@ pub const GIZZARD_DRAIN_RATE_GRANS_S: f64 = 0.1;
 /// historical hard-coded `10` in `metabolism_system`.
 pub const GIZZARD_CAPACITY_GRANS: u32 = 10;
 
-/// World dimensions (m) — used to normalize `pos` in obs_v1 (3.1). Currently
+/// World dimensions (m) — used to normalize positions. Currently
 /// fixed by the wall layout in `Simulation::new`; becomes scenario config (5.2).
 pub const WORLD_WIDTH_M: f64 = 32.0;
 pub const WORLD_HEIGHT_M: f64 = 21.0;
@@ -386,31 +386,6 @@ pub const WALL_AVOID_MARGIN_M: f64 = 2.0;
 /// ~WALK_SPEED_MS, so it reliably turns a wanderer back before it can slide;
 /// combined with the Sprint-2 velocity clamp it can never overspeed.
 pub const WALL_AVOID_STRENGTH: f64 = 1.0;
-
-/// obs_v1 (3.1) field counts.
-pub const OBS_NEIGHBOR_COUNT: usize = 7;
-pub const OBS_GRAIN_COUNT: usize = 3;
-/// 4.2 memory slots reserved in obs_v1 (zero until spatial memory ships).
-pub const OBS_MEMORY_COUNT: usize = 4;
-
-/// 3.2 event-driven reward shaping constants. Per-second rates are multiplied
-/// by `dt` (~1/120) before being added each tick (plan 3.2 CLARIFICATION) so
-/// they balance against the one-shot rewards instead of dwarfing them.
-/// +1.0 per grain consumed (one-shot).
-pub const REWARD_GRAIN: f64 = 1.0;
-/// +0.1/sec for being within 2 m of ≥ 2 other agents (flocking).
-pub const REWARD_FLOCKING_PER_S: f64 = 0.1;
-pub const REWARD_FLOCK_NEIGHBOR_DIST_M: f64 = 2.0;
-pub const REWARD_FLOCK_NEIGHBORS_MIN: usize = 2;
-/// -0.01/sec while energy is below this fraction of MAX_ENERGY_KJ (starvation
-/// pressure).
-pub const REWARD_STARVATION_PER_S: f64 = 0.01;
-pub const REWARD_STARVATION_ENERGY_FRACTION: f64 = 0.2;
-/// -10.0 when captured by a predator (one-shot).
-pub const REWARD_CAPTURED: f64 = -10.0;
-/// +0.5 when a predator leaves (despawns / moves away) without capturing — i.e.
-/// a fleeing episode ends safely (one-shot).
-pub const REWARD_FLEE_SUCCESS: f64 = 0.5;
 
 // ---------------------------------------------------------------------------
 // 6.3 calibration export — single source of truth for the Python analysis.
@@ -483,14 +458,6 @@ pub fn calibration_export_json() -> serde_json::Value {
         "grain_energy_kj": GRAIN_ENERGY_KJ,
         "world_width_m": WORLD_WIDTH_M,
         "world_height_m": WORLD_HEIGHT_M,
-        "obs_neighbor_count": OBS_NEIGHBOR_COUNT,
-        "obs_grain_count": OBS_GRAIN_COUNT,
-        "obs_memory_count": OBS_MEMORY_COUNT,
-        "reward_grain": REWARD_GRAIN,
-        "reward_flocking_per_s": REWARD_FLOCKING_PER_S,
-        "reward_starvation_per_s": REWARD_STARVATION_PER_S,
-        "reward_captured": REWARD_CAPTURED,
-        "reward_flee_success": REWARD_FLEE_SUCCESS,
         "min_population": MIN_POPULATION,
         // Sampled helper outputs so check_biology.py can verify them without
         // re-implementing the curves.
@@ -646,14 +613,6 @@ mod tests {
         assert!((0.0..1.0).contains(&NIGHT_DRAIN_FACTOR));
         assert!(NIGHT_REST_LIGHT_THRESHOLD > 0.0 && NIGHT_REST_LIGHT_THRESHOLD < 1.0);
         assert!(WORLD_WIDTH_M > 0.0 && WORLD_HEIGHT_M > 0.0);
-        assert!(OBS_NEIGHBOR_COUNT > 0 && OBS_GRAIN_COUNT > 0);
-        assert!(REWARD_GRAIN > 0.0);
-        assert!(REWARD_FLOCKING_PER_S > 0.0);
-        assert!(REWARD_STARVATION_PER_S > 0.0);
-        assert!(REWARD_CAPTURED < 0.0);
-        assert!(REWARD_FLEE_SUCCESS > 0.0);
-        assert!(REWARD_FLOCK_NEIGHBORS_MIN >= 2);
-        assert!((0.0..1.0).contains(&REWARD_STARVATION_ENERGY_FRACTION));
         // 4.2 spatial memory: sane bounds.
         assert!(MEMORY_SLOTS_MAX >= 1);
         assert!(MEMORY_DECAY_FRAMES > 0);

@@ -5,7 +5,6 @@
 
 use avian_agent::systems::run_systems;
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 
 #[test]
@@ -33,11 +32,10 @@ fn multiple_predators_all_move() {
         .0
         .clone();
 
-    let mut exporter = TelemetryExporter::new(usize::MAX);
     let mut moved1 = false;
     let mut moved2 = false;
     for _ in 0..600 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         let snap = sim.snapshot();
         if let Some(p) = snap.predators.iter().find(|p| p.uid == u1) {
             if (p.pos[0] - 5.0).abs() + (p.pos[1] - 5.0).abs() > 0.5 {
@@ -59,12 +57,11 @@ fn sequentially_deployed_predators_move() {
     // Server default config: predator_expiry ON. Run a while so agent despawns
     // free physics-body slots, THEN deploy more predators — they must move too.
     let mut sim = Simulation::new(9, SimulationConfig::default());
-    let mut exporter = TelemetryExporter::new(usize::MAX);
     sim.spawn_predator(Vector2::new(4.0, 4.0));
 
     // ~6 sim-seconds — immigration/despawns reuse body slots with new gens.
     for _ in 0..720 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
     }
 
     let e2 = sim.spawn_predator(Vector2::new(8.0, 8.0));
@@ -95,7 +92,7 @@ fn sequentially_deployed_predators_move() {
     let mut moved2 = false;
     let mut moved3 = false;
     for _ in 0..600 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         let snap = sim.snapshot();
         if let Some(p) = snap.predators.iter().find(|p| p.uid == u2) {
             if (p.pos[0] - p2.x).abs() + (p.pos[1] - p2.y).abs() > 0.5 {

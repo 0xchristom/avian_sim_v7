@@ -11,7 +11,6 @@
 use avian_agent::systems::run_systems;
 use avian_core::components::{Metabolism, Position, Velocity};
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 use rustc_hash::FxHashMap;
 
@@ -21,7 +20,6 @@ use rustc_hash::FxHashMap;
 #[test]
 fn rebuild_skips_entities_missing_agent_components() {
     let mut sim = Simulation::new(5, SimulationConfig::default());
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     // Spawn a bogus "ghost" entity that has a Position but none of the agent
     // components — the exact failure mode the old `World::get`-based rebuild
@@ -32,7 +30,7 @@ fn rebuild_skips_entities_missing_agent_components() {
         "test precondition: ghost lacks Metabolism"
     );
 
-    sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+    sim.step(run_systems);
 
     // The tick must not have panicked, and the ghost must still exist untouched.
     assert!(sim.world.get::<&Position>(ghost).is_ok());
@@ -46,7 +44,6 @@ fn rebuild_skips_entities_missing_agent_components() {
 fn rebuild_runs_across_population_scales() {
     fn run_with(agents: u32) -> usize {
         let mut sim = Simulation::new(agents as u64, SimulationConfig::default());
-        let mut exporter = TelemetryExporter::new(usize::MAX);
         for _ in 0..agents {
             let x = sim.rng.gen_range(2.0..30.0);
             let y = sim.rng.gen_range(2.0..19.0);
@@ -59,7 +56,7 @@ fn rebuild_runs_across_population_scales() {
                 uid,
             );
         }
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         let count = sim.world.query::<&Metabolism>().iter().count();
         count
     }
@@ -76,10 +73,9 @@ fn rebuild_runs_across_population_scales() {
 #[test]
 fn spatial_grid_contains_only_agents_after_rebuild() {
     let mut sim = Simulation::new(3, SimulationConfig::default());
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     let ghost = sim.world.spawn((Position(Vector2::new(5.0, 5.0)),));
-    sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+    sim.step(run_systems);
 
     // The rebuild query is internal to `run_systems`; we verify the observable
     // contract instead: the ghost never shows up as a neighbor of any agent.
@@ -117,7 +113,6 @@ fn spatial_grid_contains_only_agents_after_rebuild() {
 fn incremental_grid_drops_despawned_agents() {
     let mut sim = Simulation::new(7, SimulationConfig::default());
     sim.config.immigration_enabled = false; // fixed population, no respawns
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     let mut spawned: Vec<hecs::Entity> = Vec::new();
     for i in 0..7 {
@@ -134,7 +129,7 @@ fn incremental_grid_drops_despawned_agents() {
     assert_eq!(spawned.len(), 7, "test precondition: 7 agents");
 
     // One tick so the grid is built with all 7 live.
-    sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+    sim.step(run_systems);
     assert_eq!(sim.spatial_grid.len(), 7, "grid must index all 7 agents");
 
     // Starve the first agent → it must be despawned next tick.
@@ -142,10 +137,10 @@ fn incremental_grid_drops_despawned_agents() {
         .get::<&mut Metabolism>(spawned[0])
         .unwrap()
         .energy_kj = 0.0;
-    sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+    sim.step(run_systems);
     assert_eq!(sim.deaths, 1, "starved agent must die");
     // One more tick so the incremental rebuild's `sync_from` prunes the ghost.
-    sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+    sim.step(run_systems);
     let live: FxHashMap<_, Vector2<f64>> = sim
         .world
         .query::<(&Position, &Velocity, &Metabolism)>()
@@ -172,7 +167,6 @@ fn incremental_grid_drops_despawned_agents() {
 fn grain_cache_invalidates_on_spawn_and_consume() {
     let mut sim = Simulation::new(5, SimulationConfig::default());
     sim.config.immigration_enabled = false;
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     for i in 0..5 {
         let uid = sim.next_uid_str();
@@ -196,7 +190,7 @@ fn grain_cache_invalidates_on_spawn_and_consume() {
     // Prime the grain visibility cache by running ticks, then spawn another
     // grain — the version bump must invalidate all cached visible lists.
     for _ in 0..5 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
     }
     assert!(
         !sim.grain_vis_cache.is_empty(),

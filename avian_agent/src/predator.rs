@@ -268,11 +268,7 @@ fn far_random_point(
 /// Contact resolution: after position sync, roll capture for each predator/
 /// agent pair within contact distance. Kills despawn the agent; misses give
 /// the predator a capture cooldown. Also decrements all predator cooldowns.
-/// Returns the stable UIDs of captured agents (3.2 reward attribution).
-pub fn resolve_contact(
-    sim: &mut Simulation,
-    positions: &FxHashMap<Entity, Vector2<f64>>,
-) -> Vec<String> {
+pub fn resolve_contact(sim: &mut Simulation, positions: &FxHashMap<Entity, Vector2<f64>>) {
     let preds: Vec<(Entity, Vector2<f64>, u32)> = sim
         .world
         .query::<(&Position, &Predator)>()
@@ -326,11 +322,7 @@ pub fn resolve_contact(
         }
     }
 
-    let mut captured_uids: Vec<String> = Vec::new();
     for aid in &kills {
-        if let Ok(uid) = sim.world.get::<&AgentUid>(*aid) {
-            captured_uids.push(uid.0.clone());
-        }
         let handle = sim.world.get::<&PhysicsHandle>(*aid).ok().map(|h| h.0);
         // 7.2: energy removed from the live pool when the agent is captured.
         if let Ok(meta) = sim.world.get::<&Metabolism>(*aid) {
@@ -381,8 +373,6 @@ pub fn resolve_contact(
             }
         }
     }
-
-    captured_uids
 }
 
 /// 2.2b: count each predator's lifetime down by `dt`. Returns the entities

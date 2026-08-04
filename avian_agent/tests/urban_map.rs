@@ -7,7 +7,6 @@ use avian_agent::systems::{run_systems, spawn_grain};
 use avian_core::calibration;
 use avian_core::components::{Age, Grain, MemorySlot, MemorySlots, ObstacleKind};
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use hecs::Entity;
 use nalgebra::Vector2;
 
@@ -165,7 +164,6 @@ fn memory_bird_reaches_grain(building: bool, seed: u64, frames: u64) -> bool {
         );
     }
 
-    let mut exporter = TelemetryExporter::new(usize::MAX);
     for _ in 0..frames {
         let before: u32 = sim
             .world
@@ -173,7 +171,7 @@ fn memory_bird_reaches_grain(building: bool, seed: u64, frames: u64) -> bool {
             .iter()
             .map(|(_, g)| g.amount)
             .sum();
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         let after: u32 = sim
             .world
             .query::<&Grain>()
@@ -260,13 +258,12 @@ fn urban_los_raycast_budget_stays_bounded() {
                 uid,
             );
         }
-        let mut exporter = TelemetryExporter::new(usize::MAX);
 
         let mut frames_run: u32 = 0;
         let mut total = 0u64;
         while frames_run < frames {
             sim.physics.reset_raycast_count();
-            sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+            sim.step(run_systems);
             total += sim.physics.los_raycast_count();
             frames_run += 1;
         }

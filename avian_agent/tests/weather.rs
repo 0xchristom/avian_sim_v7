@@ -7,7 +7,6 @@ use avian_core::calibration;
 use avian_core::components::{Age, FSMState, Metabolism, Weather};
 use avian_core::events::{Event, SetWeatherRequest};
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 
 /// A single quiet bird, no grain, no immigration — the shared harness for
@@ -50,11 +49,10 @@ fn rain_reduces_vision_and_stops_foraging_for_distant_grain() {
         drop(meta);
         spawn_grain_at(&mut sim, Vector2::new(14.0, 5.0)); // 9 m east of the bird
 
-        let mut exporter = TelemetryExporter::new(usize::MAX);
         let mut forage = 0u32;
         let mut total = 0u32;
         for _ in 0..120 {
-            sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+            sim.step(run_systems);
             for (_, fsm) in sim.world.query::<&FSMState>().iter() {
                 if *fsm == FSMState::Foraging {
                     forage += 1;
@@ -95,9 +93,8 @@ fn heat_increases_energy_expenditure() {
         let mut sim = single_bird(7);
         sim.environment.weather = weather;
         sim.environment.weather_intensity = intensity;
-        let mut exporter = TelemetryExporter::new(usize::MAX);
         for _ in 0..600 {
-            sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+            sim.step(run_systems);
         }
         sim.total_energy_expenditure_kj
     };
@@ -120,9 +117,8 @@ fn wind_drifts_agents() {
         sim.environment.weather_intensity = intensity;
         sim.environment.wind_heading = 0.0; // easterly
         let start = bird_x(&sim);
-        let mut exporter = TelemetryExporter::new(usize::MAX);
         for _ in 0..300 {
-            sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+            sim.step(run_systems);
         }
         bird_x(&sim) - start
     };
@@ -152,12 +148,11 @@ fn set_weather_event_applies_and_ramps_smoothly() {
     // The smooth intensity ramp runs inside the (config-gated) scheduler.
     sim.config.weather_enabled = true;
 
-    let mut exporter = TelemetryExporter::new(usize::MAX);
     sim.inject_event(Event::SetWeather(SetWeatherRequest {
         weather: Weather::Rain,
     }));
     for _ in 0..130 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
     }
     assert_eq!(sim.environment.weather, Weather::Rain);
     assert!(
@@ -170,7 +165,7 @@ fn set_weather_event_applies_and_ramps_smoothly() {
         weather: Weather::Clear,
     }));
     for _ in 0..130 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
     }
     assert_eq!(sim.environment.weather, Weather::Clear);
     assert!(
@@ -200,10 +195,9 @@ fn scheduler_eventually_changes_weather() {
         ..SimulationConfig::default()
     };
     let mut sim = Simulation::new(2024, config);
-    let mut exporter = TelemetryExporter::new(usize::MAX);
     let mut non_clear = 0u32;
     for _ in 0..(calibration::WEATHER_UPDATE_INTERVAL_FRAMES * 3) {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         assert!((0.0..=1.0).contains(&sim.environment.weather_intensity));
         if sim.environment.weather != Weather::Clear {
             non_clear += 1;

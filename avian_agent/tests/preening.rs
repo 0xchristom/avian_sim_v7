@@ -6,7 +6,6 @@ use avian_agent::gerontology::spawn_agent;
 use avian_agent::systems::run_systems;
 use avian_core::components::{Age, FSMState, FeatherCondition, Metabolism};
 use avian_core::{Simulation, SimulationConfig};
-use avian_telemetry::exporter::TelemetryExporter;
 use hecs::Entity;
 use nalgebra::Vector2;
 use std::collections::HashMap;
@@ -25,11 +24,10 @@ fn test_low_feathers_triggers_preening_and_restores() {
     // Young age → vitality ~0.84, so the 2.7 Sick branch never preempts preening.
     sim.world.get::<&mut Age>(e).unwrap().years = 1.0;
     sim.world.get::<&mut FeatherCondition>(e).unwrap().0 = 0.1;
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     let mut saw_preening = false;
     for _ in 0..120 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         let fsm = *sim.world.get::<&FSMState>(e).unwrap();
         if fsm == FSMState::Preening {
             saw_preening = true;
@@ -62,12 +60,11 @@ fn test_preening_time_budget_share() {
         // preening duty cycle and skew the share below the band.
         sim.world.get::<&mut Age>(e).unwrap().years = 1.0;
     }
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     let mut agent_frames = 0u64;
     let mut preen_frames = 0u64;
     for _ in 0..5000 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         let mut preening = 0usize;
         let mut total = 0usize;
         for (_, fsm) in sim.world.query::<&FSMState>().iter() {
@@ -120,12 +117,11 @@ fn test_preening_is_desynchronized_across_agents() {
         sim.world.get::<&mut Age>(e).unwrap().years = 1.0;
         sim.world.get::<&mut Metabolism>(e).unwrap().energy_kj = 60.0;
     }
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     // First tick (frame) each agent enters Preening.
     let mut first_preen: HashMap<Entity, u64> = HashMap::new();
     for tick in 0..4000u64 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         for (e, fsm) in sim.world.query::<&FSMState>().iter() {
             if *fsm == FSMState::Preening && !first_preen.contains_key(&e) {
                 first_preen.insert(e, tick);
@@ -179,12 +175,11 @@ fn test_preening_stays_desynchronized_across_night() {
         sim.world.get::<&mut Age>(e).unwrap().years = 1.0;
         sim.world.get::<&mut Metabolism>(e).unwrap().energy_kj = 60.0;
     }
-    let mut exporter = TelemetryExporter::new(usize::MAX);
 
     let mut max_simultaneous = 0usize;
     let mut saw_night = false;
     for _ in 0..120u64 {
-        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        sim.step(run_systems);
         if sim.environment.light_level < avian_core::calibration::NIGHT_REST_LIGHT_THRESHOLD {
             saw_night = true;
         }

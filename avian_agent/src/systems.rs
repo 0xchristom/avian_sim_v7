@@ -7,11 +7,8 @@ use crate::perception::cone_cast;
 use crate::predator;
 use avian_core::calibration;
 use avian_core::components::*;
-use avian_core::AgentSnapshot;
 use avian_core::Simulation;
 use avian_core::{GrainVisCacheEntry, NeighborCacheEntry};
-use avian_telemetry::exporter::TelemetryExporter;
-use avian_telemetry::rlhf::{state_to_observation, RLReward};
 use hecs::Entity;
 use nalgebra::Vector2;
 use rustc_hash::FxHashMap;
@@ -55,17 +52,7 @@ fn remember_food(slots: &mut Vec<MemorySlot>, pos: Vector2<f64>) {
     });
 }
 
-/// Per-agent snapshot captured in the behavior loop and exported to telemetry
-/// after physics, so rewards can include the frame's events (grain eaten,
-/// capture, flee-success).
-struct RlExportData {
-    snap: AgentSnapshot,
-    neighbor_pos: Vec<[f64; 2]>,
-    grain_pos: Vec<[f64; 2]>,
-    flock_count: usize,
-}
-
-pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExporter) {
+pub fn run_systems(sim: &mut Simulation, dt: f64) {
     // 2.3 day/night cycle. A full day = sim.config.day_length_sim_s sim-seconds
     // (Audit 4 §9.7: scenario-tunable via simulation.toml; defaults to the
     // calibration constant DAY_LENGTH_SIM_S for headless runs).
@@ -84,22 +71,10 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     // 4.4: stochastic weather scheduler (config-gated; no-op when disabled).
     crate::weather::update(sim);
 
-    // 2.5: flush injected events to telemetry with their frame number
-    // (ground-truth annotations) and application result (Sprint 5: no-ops are
-    // recorded, not reported as success).
-    for (frame, ev, outcome) in sim.events_log.drain(..) {
-        let payload = match serde_json::to_value(&ev) {
-            Ok(serde_json::Value::Object(mut obj)) => {
-                if outcome == avian_core::events::EventOutcome::NoOp {
-                    obj.insert("noop".to_string(), serde_json::Value::Bool(true));
-                }
-                serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_default()
-            }
-            Ok(v) => serde_json::to_string(&v).unwrap_or_default(),
-            Err(_) => String::new(),
-        };
-        exporter.log_event(frame, &payload);
-    }
+    // 2.5: drain the bounded injected-event journal. The events themselves are
+    // game state (viewer event log + scenario replay); the journal is re-filled
+    // during this tick and read back by the caller/tests after it returns.
+    sim.events_log.clear();
 
     // 4.4: current weather multipliers, shared by every agent this frame so
     // the two drain paths (metabolism_system + inline mirror) stay in lockstep.
@@ -189,7 +164,7 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
 
     // 4.2 spatial memory: decay remembered slots and pick each agent's
     // memory-biased forage target (weighted by strength) BEFORE the main loop,
-    // so the tree tick can consume it without bloating the 15-element query.
+    // so the tree tick can consume it without bloating the 14-element query.
     let mut memory_targets: FxHashMap<Entity, Option<Vector2<f64>>> = FxHashMap::default();
     for (id, (memory, _)) in sim.world.query_mut::<(&mut MemorySlots, &Position)>() {
         memory.slots.retain_mut(|slot| {
@@ -220,38 +195,12 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
 
     let tree = build_default_tree();
     let mut commands: Vec<(Entity, Vector2<f64>)> = Vec::new();
-    let mut agent_data_for_rl: Vec<RlExportData> = Vec::new();
     let mut to_despawn: Vec<Entity> = Vec::new();
     // Audit 3 (Phase 2): with no static obstacles the ONLY fixed colliders are
     // the four boundary walls. Any interior→interior sight segment lies inside
     // the convex arena and can never hit them, so LOS raycasts are pure waste —
     // skip them entirely (bit-identical result, since they can never occlude).
     let has_obstacles = !sim.obstacles.is_empty();
-
-    // 6.1: spatial memory per entity for the viewer's fading memory dots. Built
-    // before the 15-component agent query (hecs tuple limit) as a side map.
-    // Audit 3 (Phase 1): hoisted once per frame — this map feeds ONLY the RLHF
-    // export snapshot (`snap.memory`), so when telemetry is disabled it is a
-    // pure per-frame heap allocation with zero purpose and must not exist.
-    let telemetry_on = exporter.is_enabled();
-    let memory_by_entity: std::collections::HashMap<_, Vec<[f64; 3]>> = if telemetry_on {
-        sim.world
-            .query::<&MemorySlots>()
-            .iter()
-            .map(|(id, ms)| {
-                (
-                    id,
-                    ms.slots
-                        .iter()
-                        .map(|s| [s.pos.x, s.pos.y, s.strength])
-                        .collect(),
-                )
-            })
-            .collect()
-    } else {
-        // Empty HashMap allocates nothing; kept so the read site below type-checks.
-        std::collections::HashMap::new()
-    };
 
     for (
         id,
@@ -268,7 +217,6 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
             head_bob,
             age,
             _phys_handle,
-            uid,
             alarm,
             feather,
         ),
@@ -285,7 +233,6 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         &mut HeadBob,
         &mut Age,
         &PhysicsHandle,
-        &AgentUid,
         &mut Alarm,
         &mut FeatherCondition,
     )>() {
@@ -440,17 +387,6 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         );
         let visible_neighbor_entities: Vec<Entity> =
             visible_neighbors.iter().map(|(e, _, _)| *e).collect();
-        // Audit 3 (Phase 1): the per-agent RLHF export vectors are collected
-        // only when telemetry is on — they feed `RlExportData` (obs_v1 neighbor
-        // context), never the behavior tree. `Vec::new()` allocates nothing.
-        let visible_neighbor_pos: Vec<[f64; 2]> = if telemetry_on {
-            visible_neighbors
-                .iter()
-                .map(|(_, p, _)| [p.x, p.y])
-                .collect()
-        } else {
-            Vec::new()
-        };
 
         // Audit 3 (Phase 2): cached visible-grain list. Reuse the previous
         // tick's list while the agent hasn't moved/rotated beyond tolerance and
@@ -515,27 +451,11 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
             );
             visible
         };
-        let visible_grain_pos: Vec<[f64; 2]> = if telemetry_on {
-            visible_grains.iter().map(|(_, p, _)| [p.x, p.y]).collect()
-        } else {
-            Vec::new()
-        };
 
         let fleeing = threats.contains_key(&id);
         let flee_dir = threats.get(&id).copied().unwrap_or(Vector2::zeros());
         alarm.0 = fleeing;
         let sick = age.vitality < calibration::SICK_VITALITY_THRESHOLD;
-        // 3.2 flocking reward input: agents within the 2 m shaping radius.
-        // Audit 3 (Phase 1): only consumed by the RLHF reward — skip the scan
-        // entirely when telemetry is off.
-        let flock_count = if telemetry_on {
-            neighbors_raw
-                .iter()
-                .filter(|(_, d)| *d <= calibration::REWARD_FLOCK_NEIGHBOR_DIST_M)
-                .count()
-        } else {
-            0
-        };
 
         let mut ctx = AgentContext {
             pos,
@@ -664,52 +584,13 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         ctx.head_bob.time_in_phase = head_bob_system.time_in_phase;
 
         commands.push((id, ctx.vel.0));
-
-        // Audit 3 (Phase 1): the AgentSnapshot is telemetry-only (the viewer
-        // reads `Simulation::snapshot()`, built independently in avian_core).
-        // Building it here — including the per-agent `memory` Vec clone — would
-        // be a heap allocation per agent per frame when telemetry is off, so it
-        // is constructed strictly inside the gated block.
-        if telemetry_on {
-            let snap = AgentSnapshot {
-                uid: uid.0.clone(),
-                pos: [ctx.pos.0.x, ctx.pos.0.y],
-                heading: ctx.head.0,
-                vel: [ctx.vel.0.x, ctx.vel.0.y],
-                mass_g: ctx.mass.current_g,
-                age_years: age.years,
-                energy_kj: ctx.meta.energy_kj,
-                hunger: ctx.meta.hunger,
-                fsm_state: *ctx.fsm,
-                head_offset: [ctx.head_bob.offset.x, ctx.head_bob.offset.y],
-                alarm_triggered: alarm.0,
-                sick,
-                vitality: age.vitality,
-                // 6.1: viewer memory dots — [x, y, strength] of remembered food.
-                memory: memory_by_entity.get(&id).cloned().unwrap_or_default(),
-            };
-            agent_data_for_rl.push(RlExportData {
-                snap,
-                neighbor_pos: visible_neighbor_pos,
-                grain_pos: visible_grain_pos,
-                flock_count,
-            });
-        }
     }
 
-    // 3.2 flee-success tracking (separate pass — keeps the main loop query at
-    // 15 elements, hecs' tuple limit): an alarm that clears without a capture
-    // this frame is a safely-ended fleeing episode (+0.5 one-shot).
-    let mut flee_success_uids: HashSet<String> = HashSet::new();
-    for (_, (alarm_prev, alarm, uid)) in
-        sim.world.query_mut::<(&mut AlarmPrev, &Alarm, &AgentUid)>()
-    {
-        let was_alarmed = alarm_prev.0;
-        let fleeing = alarm.0;
-        if was_alarmed && !fleeing {
-            flee_success_uids.insert(uid.0.clone());
-        }
-        alarm_prev.0 = fleeing;
+    // 2.6: alarm-prev roll-forward (the flee-success reward tracking was
+    // removed with the RLHF export shell; AlarmPrev still advances so its
+    // checkpoint roundtrip stays exercised).
+    for (_, (alarm_prev, alarm)) in sim.world.query_mut::<(&mut AlarmPrev, &Alarm)>() {
+        alarm_prev.0 = alarm.0;
     }
 
     // Apply agent velocities + predator pursuit, then one physics step.
@@ -750,19 +631,16 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
 
     sim.physics.step();
 
-    // Sync agent positions from physics + grain consumption. Consuming agent
-    // UIDs feed the 3.2 +1.0 grain reward at export.
+    // Sync agent positions from physics + grain consumption.
     let mut grains_to_consume: Vec<Entity> = Vec::new();
     let mut consumed_set: HashSet<Entity> = HashSet::new();
-    let mut consumed_uids: Vec<String> = Vec::new();
 
-    for (_id, (pos, _head, phys_handle, meta, fsm, uid, memory)) in sim.world.query_mut::<(
+    for (_id, (pos, _head, phys_handle, meta, fsm, memory)) in sim.world.query_mut::<(
         &mut Position,
         &mut Heading,
         &PhysicsHandle,
         &mut Metabolism,
         &FSMState,
-        &AgentUid,
         &mut MemorySlots,
     )>() {
         if let Some(rb) = sim.physics.get_body(phys_handle.0) {
@@ -797,7 +675,6 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
                     sim.total_energy_intake_kj += calibration::GRAIN_ENERGY_KJ;
                     // 6.2: forage-success counter for the metrics dashboard.
                     sim.grains_consumed += 1;
-                    consumed_uids.push(uid.0.clone());
                     // 4.2 spatial memory: committing food to memory is coupled
                     // to finding it (within MEMORY_FOUND_DIST_M = consumption
                     // radius). Upsert with strength 1.0, LRU-evict at cap.
@@ -836,9 +713,8 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         post_step_positions.insert(id, pos.0);
     }
 
-    // 2.2 contact resolution (kills + cooldowns). Captured UIDs feed the 3.2
-    // -10.0 one-shot reward at export.
-    let captured_uids = predator::resolve_contact(sim, &post_step_positions);
+    // 2.2 contact resolution (kills + cooldowns).
+    predator::resolve_contact(sim, &post_step_positions);
 
     // 2.2b: expire predators whose randomized 5-15 s lifetime elapsed — remove
     // physics body + entity and log a `RemovePredator` ground-truth event.
@@ -921,79 +797,5 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         // Audit 3 (Phase 2): the grain set changed → visible-grain caches must
         // recompute next tick.
         sim.grains_version = sim.grains_version.wrapping_add(1);
-    }
-
-    // RLHF export: obs_v1 observation + 3.2 event-driven reward (sparse +
-    // shaped, per-second terms already scaled by dt). Skipped entirely when
-    // telemetry is disabled (6.2: no `--output` server flag → no obs/reward
-    // work at all). Audit 3 (Phase 1): the fast-path early return sits BEFORE
-    // the `predator_positions` Vec, so the O(predators) per-frame heap
-    // allocation only exists on the telemetry-enabled path.
-    if !telemetry_on {
-        return;
-    }
-    let predator_positions: Vec<[f64; 2]> = sim
-        .world
-        .query::<(&Position, &Predator)>()
-        .iter()
-        .map(|(_, (p, _))| [p.0.x, p.0.y])
-        .collect();
-    let time_us = sim.time.time_us;
-    let frame = sim.time.frame;
-    let light_level = sim.environment.light_level;
-    for data in agent_data_for_rl {
-        let obs = state_to_observation(
-            &data.snap,
-            &data.neighbor_pos,
-            &data.grain_pos,
-            &predator_positions,
-            light_level,
-        );
-        let grain_eaten = consumed_uids.iter().any(|u| u == &data.snap.uid);
-        let captured = captured_uids.iter().any(|u| u == &data.snap.uid);
-        let flee_success = flee_success_uids.contains(&data.snap.uid);
-        let reward = RLReward::compute(
-            sim.config.dt as f32,
-            data.snap.energy_kj as f32,
-            calibration::MAX_ENERGY_KJ as f32,
-            data.flock_count,
-            data.snap.alarm_triggered,
-            flee_success,
-            grain_eaten,
-            captured,
-        );
-
-        // 3.5 ground-truth event labels for this frame.
-        let mut event_labels: Vec<String> = Vec::new();
-        if grain_eaten {
-            event_labels.push("grain_consumed".into());
-        }
-        if captured {
-            event_labels.push("captured".into());
-        }
-        if flee_success {
-            event_labels.push("flee_success".into());
-        }
-        if data.snap.alarm_triggered {
-            event_labels.push("predator_seen".into());
-        }
-
-        exporter.push(avian_telemetry::exporter::TelemetryFrame {
-            time_us,
-            frame,
-            uid: data.snap.uid,
-            obs: obs.vector.to_vec(),
-            reward: reward.total,
-            alarm_triggered: data.snap.alarm_triggered,
-            sick: data.snap.sick,
-            reward_grain: reward.grain,
-            reward_flocking: reward.flocking,
-            reward_starvation: reward.starvation,
-            reward_captured: reward.captured,
-            reward_flee_success: reward.flee_success,
-            fsm: data.snap.fsm_state.as_str().to_string(),
-            event_labels,
-            next_fsm: String::new(),
-        });
     }
 }
