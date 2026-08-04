@@ -34,3 +34,6 @@ viewer/dist/assets/background-no-fireflies.jpg
 
 # Internal review audits (not for public distribution)
 audits/
+
+# Documentation / markdown (internal notes, audits, reports — not for the repo)
+*.md
