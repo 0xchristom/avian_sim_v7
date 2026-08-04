@@ -6,6 +6,7 @@ pub mod metabolism;
 pub mod metrics;
 pub mod perception;
 pub mod predator;
+pub mod scripted_population;
 pub mod search;
 pub mod systems;
 pub mod union_find;

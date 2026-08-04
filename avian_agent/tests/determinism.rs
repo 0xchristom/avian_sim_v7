@@ -3,7 +3,6 @@ use avian_agent::systems::run_systems;
 use avian_core::events::{Event, SpawnGrainRequest};
 use avian_core::{Simulation, SimulationConfig};
 use avian_telemetry::exporter::TelemetryExporter;
-use bincode;
 
 fn setup_sim() -> Simulation {
     let mut sim = Simulation::new(42, SimulationConfig::default());
@@ -139,7 +138,7 @@ fn test_bit_perfect_with_predator_contact_and_reproduction() {
         predator_fill_meals: false,
         ..SimulationConfig::default()
     };
-    let mut build = || {
+    let build = || {
         let mut sim = Simulation::new(7, cfg.clone());
         let center = nalgebra::Vector2::new(16.0, 10.5);
         for _ in 0..20 {
@@ -177,5 +176,125 @@ fn test_bit_perfect_with_predator_contact_and_reproduction() {
     assert_eq!(
         snap1, snap2,
         "Predator-contact runs diverged! Determinism broken."
+    );
+}
+
+// Sprint 1 (Audit 5) acceptance: "The determinism test passes for at least
+// 10,000 steps." The 5,000-frame predator test above proves stability; this
+// test pushes the same predator+reproduction scenario to 10,000 frames so the
+// acceptance criterion is met by an actual test, not extrapolation.
+#[test]
+fn test_bit_perfect_10000_frames_predator_reproduction() {
+    let cfg = SimulationConfig {
+        predator_expiry: false,
+        predator_fill_meals: false,
+        ..SimulationConfig::default()
+    };
+    let build = || {
+        let mut sim = Simulation::new(7, cfg.clone());
+        let center = nalgebra::Vector2::new(16.0, 10.5);
+        for _ in 0..20 {
+            let x = center.x + sim.rng.gen_range(-5.0..5.0);
+            let y = center.y + sim.rng.gen_range(-5.0..5.0);
+            let uid = sim.next_uid_str();
+            spawn_agent(
+                &mut sim.world,
+                &mut sim.rng,
+                nalgebra::Vector2::new(x, y),
+                &mut sim.physics,
+                uid,
+            );
+        }
+        sim.spawn_predator(center);
+        sim
+    };
+
+    let mut sim1 = build();
+    let mut sim2 = build();
+    let mut exp1 = TelemetryExporter::new(10_000);
+    let mut exp2 = TelemetryExporter::new(10_000);
+
+    for _ in 0..10_000 {
+        sim1.step(|s, dt| run_systems(s, dt, &mut exp1));
+        sim2.step(|s, dt| run_systems(s, dt, &mut exp2));
+    }
+
+    assert!(
+        sim1.predator_kills > 0,
+        "predator should capture at least once"
+    );
+    assert_eq!(sim1.time.frame, 10_000);
+    let snap1 = bincode::serialize(&sim1.snapshot()).unwrap();
+    let snap2 = bincode::serialize(&sim2.snapshot()).unwrap();
+    assert_eq!(
+        snap1, snap2,
+        "10,000-frame predator runs diverged! Determinism broken."
+    );
+}
+
+// Sprint 5 (release gate): headless determinism must extend to the telemetry
+// OUTPUT, not just the in-memory snapshot. Two identical runs (same seed/config,
+// same injected events) must produce identical telemetry frames. Compare the
+// CSV files as sorted line sets because `finish()` drains a HashMap whose
+// iteration order is unspecified.
+#[test]
+fn test_telemetry_output_is_bit_identical() {
+    use avian_telemetry::exporter::TelemetryExporter;
+
+    fn run(output: &str) {
+        let mut sim = Simulation::new(42, SimulationConfig::default());
+        let mut exporter = TelemetryExporter::new(2000);
+        exporter.open(std::path::Path::new(output)).unwrap();
+        // Same event schedule into both runs so the deterministic input stream
+        // is identical (2.5 replay log).
+        for frame in 0..300u64 {
+            sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+            let ev = match frame {
+                50 => Some(Event::SpawnGrain(SpawnGrainRequest {
+                    pos: [5.0, 5.0],
+                    count: 10,
+                })),
+                150 => Some(Event::SpawnGrain(SpawnGrainRequest {
+                    pos: [20.0, 15.0],
+                    count: 5,
+                })),
+                _ => None,
+            };
+            if let Some(ev) = ev {
+                sim.inject_event(ev);
+            }
+        }
+        exporter.finish();
+    }
+
+    let p1 = std::env::temp_dir().join("avian_det_tel_1.csv");
+    let p2 = std::env::temp_dir().join("avian_det_tel_2.csv");
+    let p1s = p1.to_str().unwrap().to_string();
+    let p2s = p2.to_str().unwrap().to_string();
+    run(&p1s);
+    run(&p2s);
+
+    let read_lines = |p: &str| -> Vec<String> {
+        let content = std::fs::read_to_string(p).expect("telemetry file exists");
+        let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+        lines.sort();
+        lines
+    };
+    let a = read_lines(&p1s);
+    let b = read_lines(&p2s);
+
+    let _ = std::fs::remove_file(&p1);
+    let _ = std::fs::remove_file(&p2);
+
+    assert!(
+        a.len() > 1,
+        "telemetry should contain frames plus the CSV header"
+    );
+    assert_eq!(
+        a,
+        b,
+        "identical runs produced different telemetry output (frame count {} vs {})",
+        a.len(),
+        b.len()
     );
 }

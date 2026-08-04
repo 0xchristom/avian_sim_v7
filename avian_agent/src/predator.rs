@@ -80,12 +80,12 @@ pub fn collect_threats(sim: &Simulation) -> FxHashMap<Entity, Vector2<f64>> {
             if sim
                 .physics
                 .cast_ray_to_static(pos.0, offset, 1.0)
-                .map_or(false, |toi| toi < 1.0 - calibration::LOS_BLOCK_EPS)
+                .is_some_and(|toi| toi < 1.0 - calibration::LOS_BLOCK_EPS)
             {
                 continue;
             }
             let away = -offset / dist;
-            if nearest.map_or(true, |(d, _)| dist < d) {
+            if nearest.is_none_or(|(d, _)| dist < d) {
                 nearest = Some((dist, away));
             }
         }

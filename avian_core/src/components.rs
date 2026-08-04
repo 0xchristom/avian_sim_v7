@@ -260,7 +260,7 @@ pub struct Predator {
 /// Feeds the existing Forage condition as a target-picker (NOT a new condition
 /// node) — when no grain is visible, `foraging_action` picks a slot weighted by
 /// memory strength, else falls through to `Wander`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MemorySlots {
     pub slots: Vec<MemorySlot>,
 }
@@ -273,12 +273,6 @@ pub struct MemorySlot {
     pub strength: f64,
     /// Frames until this memory fades (600-frame decay, 4.2).
     pub ttl_frames: u32,
-}
-
-impl Default for MemorySlots {
-    fn default() -> Self {
-        Self { slots: Vec::new() }
-    }
 }
 
 /// Per-frame threat flag for an agent (2.2 telemetry + obs input).

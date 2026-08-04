@@ -17,9 +17,11 @@ use avian_telemetry::exporter::TelemetryExporter;
 use nalgebra::Vector2;
 
 fn urban_sim(seed: u64) -> Simulation {
-    let mut config = SimulationConfig::default();
-    config.urban_obstacles = true;
-    config.immigration_enabled = false;
+    let config = SimulationConfig {
+        urban_obstacles: true,
+        immigration_enabled: false,
+        ..SimulationConfig::default()
+    };
     Simulation::new(seed, config)
 }
 
@@ -144,6 +146,7 @@ fn no_glide_outside_thermal() {
     }
 }
 
+#[allow(clippy::assertions_on_constants)]
 #[test]
 fn glide_mr_is_near_zero_versus_flight() {
     let v = calibration::GLIDE_SPEED_MS;

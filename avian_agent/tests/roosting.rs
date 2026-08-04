@@ -18,8 +18,10 @@ use nalgebra::Vector2;
 const POPULATION: usize = 30;
 
 fn night_sim(seed: u64) -> Simulation {
-    let mut config = SimulationConfig::default();
-    config.immigration_enabled = false;
+    let config = SimulationConfig {
+        immigration_enabled: false,
+        ..SimulationConfig::default()
+    };
     let mut sim = Simulation::new(seed, config);
     // Forced midnight — light_level ≈ 0.1 (< 0.3) for the whole test window.
     sim.environment.time_of_day_hours = 0.0;
@@ -74,7 +76,7 @@ fn night_flock_roosts_with_sentinel_fraction() {
     // P(X≥10) ≈ 0.005, so a fixed-seed run must land in 1..=10 — neither zero
     // sentinels nor an empty roost — and sit near the target fraction.
     assert!(
-        scanning >= 1 && scanning <= 10,
+        (1..=10).contains(&scanning),
         "sentinel count {scanning} out of the binomial band for n={POPULATION}, p={}",
         calibration::SENTINEL_FRACTION
     );

@@ -5,7 +5,7 @@
 
 use avian_agent::gerontology::spawn_agent;
 use avian_agent::systems::run_systems;
-use avian_core::components::{Age, AgentUid, Metabolism, Position};
+use avian_core::components::{Age, AgentUid, Position};
 use avian_core::events::Event;
 use avian_core::{Simulation, SimulationConfig};
 use avian_telemetry::exporter::TelemetryExporter;

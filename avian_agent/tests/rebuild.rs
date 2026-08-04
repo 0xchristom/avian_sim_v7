@@ -91,7 +91,7 @@ fn spatial_grid_contains_only_agents_after_rebuild() {
         .collect();
     let agent_positions: Vec<Vector2<f64>> = positions.values().copied().collect();
     assert!(
-        agent_positions.len() > 0,
+        !agent_positions.is_empty(),
         "test precondition: at least one agent"
     );
 
@@ -99,9 +99,9 @@ fn spatial_grid_contains_only_agents_after_rebuild() {
     // agent is co-located with the ghost such that it could alias as a
     // neighbor via the grid.
     let ghost_pos = sim.world.get::<&Position>(ghost).unwrap().0;
-    assert!(positions.get(&ghost).is_none(), "ghost is not an agent");
+    assert!(!positions.contains_key(&ghost), "ghost is not an agent");
     assert!(
-        !agent_positions.contains(&ghost_pos) || positions.get(&ghost).is_none(),
+        !agent_positions.contains(&ghost_pos) || !positions.contains_key(&ghost),
         "ghost position must not alias an agent"
     );
 

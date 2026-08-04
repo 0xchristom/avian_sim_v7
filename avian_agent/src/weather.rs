@@ -71,8 +71,10 @@ mod tests {
 
     #[test]
     fn enabled_weather_stays_bounded_and_ramps_smoothly() {
-        let mut config = SimulationConfig::default();
-        config.weather_enabled = true;
+        let config = SimulationConfig {
+            weather_enabled: true,
+            ..SimulationConfig::default()
+        };
         let mut sim = Simulation::new(7, config);
         let mut max_intensity = 0.0f64;
         for _ in 0..(calibration::WEATHER_UPDATE_INTERVAL_FRAMES * 5) {

@@ -13,8 +13,10 @@ use nalgebra::Vector2;
 /// A single quiet bird, no grain, no immigration — the shared harness for
 /// drain/drift tests. `energy` is pinned so the bird never starves.
 fn single_bird(seed: u64) -> Simulation {
-    let mut config = SimulationConfig::default();
-    config.immigration_enabled = false;
+    let config = SimulationConfig {
+        immigration_enabled: false,
+        ..SimulationConfig::default()
+    };
     let mut sim = Simulation::new(seed, config);
     let uid = sim.next_uid_str();
     let e = avian_agent::gerontology::spawn_agent(
@@ -193,8 +195,10 @@ fn snapshot_includes_weather() {
 /// intensity bounded — a sanity pass over a full re-roll cycle.
 #[test]
 fn scheduler_eventually_changes_weather() {
-    let mut config = SimulationConfig::default();
-    config.weather_enabled = true;
+    let config = SimulationConfig {
+        weather_enabled: true,
+        ..SimulationConfig::default()
+    };
     let mut sim = Simulation::new(2024, config);
     let mut exporter = TelemetryExporter::new(usize::MAX);
     let mut non_clear = 0u32;

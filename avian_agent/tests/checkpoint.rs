@@ -63,7 +63,7 @@ fn fingerprint(sim: &Simulation) -> String {
         .world
         .query::<(&AgentUid, &Position, &Metabolism, &FSMState)>()
         .iter()
-        .map(|(_, (uid, pos, meta, fsm))| (uid.0.clone(), [pos.0.x, pos.0.y], meta.energy_kj, 0.0))
+        .map(|(_, (uid, pos, meta, _))| (uid.0.clone(), [pos.0.x, pos.0.y], meta.energy_kj, 0.0))
         .collect();
     // Sort by UID so entity traversal order doesn't affect the digest.
     agents.sort_by(|a, b| a.0.cmp(&b.0));
@@ -155,7 +155,9 @@ fn test_checkpoint_roundtrip_preserves_state() {
 
 #[test]
 fn test_checkpoint_determinism_continuation() {
-    const TOTAL: u64 = 1200;
+    // Release gate: checkpoint save/load + a further 1000 steps produces the
+    // same result as the continuous run.
+    const TOTAL: u64 = 1600;
     const SPLIT: u64 = 600;
 
     // Live run: full N frames in one go.

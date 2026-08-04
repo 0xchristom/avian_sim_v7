@@ -98,6 +98,16 @@ pub struct SimulationConfig {
     /// 5.2: pre-recorded scenario events, injected at frame 0 (same semantics
     /// as the server's `--events-file`).
     pub event_schedule: Vec<Event>,
+    /// Audit 5a item 2: scripted (timer-based) population growth for the
+    /// interactive/demo run. When true, the server starts with 4 agents
+    /// (ignoring `initial_agents`) and spawns extra agents at fixed SIMULATION
+    /// time checkpoints (2/5/10/15 sim-min → totals 6/10/15/20), keyed on
+    /// `frame × dt` so the schedule is correct at any speed multiplier.
+    /// Deliberately NOT a breeding/reproduction mechanic — it is a fixed,
+    /// hardcoded schedule with no parent-child or birth-event logic, and the
+    /// server disables immigration while it is active so the schedule is the
+    /// sole population driver (audit: no interaction with 2.4 death/immigration).
+    pub scripted_population: bool,
 }
 
 /// 5.2: a scenario obstacle in toml-space. Same box semantics as the runtime
@@ -133,6 +143,7 @@ impl Default for SimulationConfig {
             flocking_enabled: true,
             obstacles: Vec::new(),
             event_schedule: Vec::new(),
+            scripted_population: false,
         }
     }
 }

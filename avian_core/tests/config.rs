@@ -140,12 +140,14 @@ fn default_config_roundtrips() {
 /// that block line-of-sight exactly like the 4.3 built-in map.
 #[test]
 fn custom_obstacle_layout_blocks_los() {
-    let mut cfg = SimulationConfig::default();
-    cfg.obstacles = vec![avian_core::ObstacleSpec {
-        kind: ObstacleKind::Building,
-        min: [10.0, 4.0],
-        max: [14.0, 8.0],
-    }];
+    let cfg = SimulationConfig {
+        obstacles: vec![avian_core::ObstacleSpec {
+            kind: ObstacleKind::Building,
+            min: [10.0, 4.0],
+            max: [14.0, 8.0],
+        }],
+        ..SimulationConfig::default()
+    };
     let sim = Simulation::new(42, cfg);
 
     assert_eq!(sim.obstacles.len(), 1);
@@ -166,9 +168,11 @@ fn custom_obstacle_layout_blocks_los() {
 /// wall is cast-able at y=8.
 #[test]
 fn world_dimensions_place_walls() {
-    let mut cfg = SimulationConfig::default();
-    cfg.world_width = 10.0;
-    cfg.world_height = 8.0;
+    let cfg = SimulationConfig {
+        world_width: 10.0,
+        world_height: 8.0,
+        ..SimulationConfig::default()
+    };
     let sim = Simulation::new(1, cfg);
 
     // Standing below the top wall, looking straight up: must hit at y=8.
@@ -195,8 +199,10 @@ fn world_dimensions_place_walls() {
 /// `from_config` uses the config's `seed` field (falling back to 42).
 #[test]
 fn from_config_uses_seed_field() {
-    let mut cfg = SimulationConfig::default();
-    cfg.seed = Some(7);
+    let cfg = SimulationConfig {
+        seed: Some(7),
+        ..SimulationConfig::default()
+    };
     let mut a = Simulation::from_config(cfg.clone());
     let mut b = Simulation::new(7, cfg);
     // Same seed → identical RNG stream.
@@ -220,8 +226,10 @@ fn from_config_uses_seed_field() {
 
 #[test]
 fn validate_rejects_zero_dt() {
-    let mut cfg = SimulationConfig::default();
-    cfg.dt = 0.0;
+    let cfg = SimulationConfig {
+        dt: 0.0,
+        ..SimulationConfig::default()
+    };
     assert!(cfg.validate().is_err(), "dt == 0 must be rejected");
     assert!(Simulation::try_new(1, cfg.clone()).is_err());
     assert!(Simulation::try_from_config(cfg).is_err());
@@ -230,8 +238,10 @@ fn validate_rejects_zero_dt() {
 #[test]
 fn validate_rejects_nan_and_infinite_dt() {
     for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        let mut cfg = SimulationConfig::default();
-        cfg.dt = bad;
+        let cfg = SimulationConfig {
+            dt: bad,
+            ..SimulationConfig::default()
+        };
         assert!(cfg.validate().is_err(), "dt={bad} must be rejected");
     }
 }
@@ -239,34 +249,46 @@ fn validate_rejects_nan_and_infinite_dt() {
 #[test]
 fn validate_rejects_bad_world_dimensions() {
     for (w, h) in [(0.0, 21.0), (32.0, 0.0), (-5.0, 21.0), (f64::NAN, 21.0)] {
-        let mut cfg = SimulationConfig::default();
-        cfg.world_width = w;
-        cfg.world_height = h;
+        let cfg = SimulationConfig {
+            world_width: w,
+            world_height: h,
+            ..SimulationConfig::default()
+        };
         assert!(cfg.validate().is_err(), "world {w}x{h} must be rejected");
     }
 }
 
 #[test]
 fn validate_rejects_bad_time_scale_and_day_length() {
-    let mut cfg = SimulationConfig::default();
-    cfg.time_scale = 0.0;
+    let cfg = SimulationConfig {
+        time_scale: 0.0,
+        ..SimulationConfig::default()
+    };
     assert!(cfg.validate().is_err());
-    let mut cfg = SimulationConfig::default();
-    cfg.day_length_sim_s = 0.0;
+    let cfg = SimulationConfig {
+        day_length_sim_s: 0.0,
+        ..SimulationConfig::default()
+    };
     assert!(cfg.validate().is_err());
-    let mut cfg = SimulationConfig::default();
-    cfg.day_length_sim_s = f64::NAN;
+    let cfg = SimulationConfig {
+        day_length_sim_s: f64::NAN,
+        ..SimulationConfig::default()
+    };
     assert!(cfg.validate().is_err());
 }
 
 #[test]
 fn validate_rejects_zero_max_agents_and_overspawn() {
-    let mut cfg = SimulationConfig::default();
-    cfg.max_agents = 0;
+    let cfg = SimulationConfig {
+        max_agents: 0,
+        ..SimulationConfig::default()
+    };
     assert!(cfg.validate().is_err());
-    let mut cfg = SimulationConfig::default();
-    cfg.max_agents = 10;
-    cfg.initial_agents = 11;
+    let cfg = SimulationConfig {
+        max_agents: 10,
+        initial_agents: 11,
+        ..SimulationConfig::default()
+    };
     assert!(
         cfg.validate().is_err(),
         "initial_agents > max_agents must fail"
@@ -276,34 +298,40 @@ fn validate_rejects_zero_max_agents_and_overspawn() {
 #[test]
 fn validate_rejects_bad_obstacle_boxes() {
     // Reversed box (max < min).
-    let mut cfg = SimulationConfig::default();
-    cfg.obstacles = vec![avian_core::ObstacleSpec {
-        kind: ObstacleKind::Building,
-        min: [10.0, 4.0],
-        max: [5.0, 8.0],
-    }];
+    let cfg = SimulationConfig {
+        obstacles: vec![avian_core::ObstacleSpec {
+            kind: ObstacleKind::Building,
+            min: [10.0, 4.0],
+            max: [5.0, 8.0],
+        }],
+        ..SimulationConfig::default()
+    };
     assert!(cfg.validate().is_err(), "reversed box must fail");
 
     // Box outside the arena.
-    let mut cfg = SimulationConfig::default();
-    cfg.obstacles = vec![avian_core::ObstacleSpec {
-        kind: ObstacleKind::Building,
-        min: [30.0, 4.0],
-        max: [40.0, 8.0],
-    }];
+    let cfg = SimulationConfig {
+        obstacles: vec![avian_core::ObstacleSpec {
+            kind: ObstacleKind::Building,
+            min: [30.0, 4.0],
+            max: [40.0, 8.0],
+        }],
+        ..SimulationConfig::default()
+    };
     assert!(cfg.validate().is_err(), "out-of-arena box must fail");
 }
 
 #[test]
 fn validate_accepts_default_and_valid_custom() {
     assert!(SimulationConfig::default().validate().is_ok());
-    let mut cfg = SimulationConfig::default();
-    cfg.dt = 1.0 / 60.0;
-    cfg.gravity = -9.81;
-    cfg.world_width = 40.0;
-    cfg.world_height = 25.0;
-    cfg.max_agents = 500;
-    cfg.initial_agents = 50;
+    let cfg = SimulationConfig {
+        dt: 1.0 / 60.0,
+        gravity: -9.81,
+        world_width: 40.0,
+        world_height: 25.0,
+        max_agents: 500,
+        initial_agents: 50,
+        ..SimulationConfig::default()
+    };
     assert!(cfg.validate().is_ok());
     let sim = Simulation::try_new(1, cfg.clone()).expect("valid config builds");
     assert!(
@@ -317,9 +345,11 @@ fn validate_accepts_default_and_valid_custom() {
 /// body behavior — the physics world is driven by config, not hard-coded.
 #[test]
 fn physics_uses_config_dt_and_gravity() {
-    let mut cfg = SimulationConfig::default();
-    cfg.dt = 1.0 / 60.0;
-    cfg.gravity = -9.81;
+    let cfg = SimulationConfig {
+        dt: 1.0 / 60.0,
+        gravity: -9.81,
+        ..SimulationConfig::default()
+    };
     let mut sim = Simulation::try_new(1, cfg).expect("valid config");
     assert!((sim.physics.dt() - 1.0 / 60.0).abs() < 1e-9);
 

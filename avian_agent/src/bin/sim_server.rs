@@ -1,5 +1,6 @@
 use avian_agent::gerontology::spawn_agent;
 use avian_agent::metrics::compute_metrics;
+use avian_agent::scripted_population::ScriptedGrowth;
 use avian_agent::systems::{run_systems, spawn_grain};
 use avian_core::calibration;
 use avian_core::events::Event;
@@ -22,10 +23,10 @@ const BROADCAST_INTERVAL: std::time::Duration = std::time::Duration::from_millis
 /// Any other error is a genuine I/O failure and disconnects the client, in
 /// line with the existing read-path classification.
 fn send_error_is_fatal(err: &tungstenite::Error) -> bool {
-    match err {
-        tungstenite::Error::Io(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
-        _ => true,
-    }
+    !matches!(
+        err,
+        tungstenite::Error::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock
+    )
 }
 
 fn main() {
@@ -36,6 +37,9 @@ fn main() {
     let urban = args.iter().any(|a| a == "--urban");
     // 4.4: opt-in stochastic weather scheduler (Clear/Rain/Wind/Heat).
     let weather = args.iter().any(|a| a == "--weather");
+    // 5a item 2: opt-in scripted population growth (start 4 → 6/10/15/20 at
+    // 2/5/10/15 sim-min). Also settable via simulation.toml.
+    let scripted_pop = args.iter().any(|a| a == "--scripted-population");
     let frames_target: u64 = args
         .iter()
         .position(|a| a == "--frames")
@@ -66,7 +70,7 @@ fn main() {
         .iter()
         .position(|a| a == "--format")
         .and_then(|i| args.get(i + 1))
-        .and_then(|s| Format::from_str(s))
+        .and_then(|s| Format::parse(s))
         .unwrap_or(Format::Csv);
     // 5.2: base scenario from a `simulation.toml` file. CLI flags below override
     // the file on collision (explicit command line wins over a file default).
@@ -102,6 +106,15 @@ fn main() {
     // CLI overrides (win over the file).
     config.urban_obstacles |= urban;
     config.weather_enabled |= weather;
+    config.scripted_population |= scripted_pop;
+    // Audit 5a item 2: while the scripted schedule is the population driver,
+    // immigration must stay off — otherwise the 2.4 respawn-to-MIN_POPULATION
+    // logic fights the schedule (e.g. topping the population back to 10 the
+    // moment it dips, and adding births at frame 0). The audit explicitly says
+    // the schedule has no interaction with the death/immigration logic.
+    if config.scripted_population {
+        config.immigration_enabled = false;
+    }
     if args.iter().any(|a| a == "--seed") {
         config.seed = Some(seed);
     }
@@ -169,18 +182,30 @@ fn main() {
     .ok();
 
     // 5.2: initial population/grains come from the scenario config.
-    for _ in 0..config.initial_agents {
-        let pos = avian_core::Simulation::random_free_point(
-            sim.config.world_width,
-            sim.config.world_height,
-            &sim.obstacles,
-            &mut sim.rng,
-        )
-        .unwrap_or_else(|| {
-            nalgebra::Vector2::new(sim.config.world_width / 2.0, sim.config.world_height / 2.0)
-        });
-        let uid = sim.next_uid_str();
-        spawn_agent(&mut sim.world, &mut sim.rng, pos, &mut sim.physics, uid);
+    // Audit 5a item 2: when the scripted schedule is active, the initial
+    // population is exactly SCRIPTED_START_AGENTS (the config's initial_agents
+    // is ignored) and the per-tick growth check below drives everything after.
+    let mut scripted_growth = ScriptedGrowth::default();
+    if config.scripted_population {
+        scripted_growth.spawn_start(&mut sim);
+        println!(
+            "Scripted population active: starting with {} agents, growing per schedule",
+            avian_agent::scripted_population::SCRIPTED_START_AGENTS
+        );
+    } else {
+        for _ in 0..config.initial_agents {
+            let pos = avian_core::Simulation::random_free_point(
+                sim.config.world_width,
+                sim.config.world_height,
+                &sim.obstacles,
+                &mut sim.rng,
+            )
+            .unwrap_or_else(|| {
+                nalgebra::Vector2::new(sim.config.world_width / 2.0, sim.config.world_height / 2.0)
+            });
+            let uid = sim.next_uid_str();
+            spawn_agent(&mut sim.world, &mut sim.rng, pos, &mut sim.physics, uid);
+        }
     }
     for _ in 0..config.initial_grains {
         let x = sim.rng.gen_range(2.0..sim.config.world_width - 2.0);
@@ -225,7 +250,15 @@ fn main() {
             }
             sim.step(|s, dt| run_systems(s, dt, &mut exporter));
             frame += 1;
-            if frame % 1000 == 0 {
+            // Audit 5a item 2: scripted growth is checked once per tick, keyed
+            // on sim-time (frame × dt), so it stays correct at any speed.
+            if config.scripted_population {
+                let n = scripted_growth.tick(&mut sim);
+                if n > 0 {
+                    println!("Scripted population: +{n} agents at frame {frame}");
+                }
+            }
+            if frame.is_multiple_of(1000) {
                 println!(
                     "Frame {} — agents: {}, grains: {}, telemetry frames: {}",
                     frame,
@@ -275,12 +308,9 @@ fn main() {
         match server.accept() {
             Ok((stream, _)) => {
                 stream.set_nonblocking(true).ok();
-                match accept(stream) {
-                    Ok(ws) => {
-                        println!("Client connected ({} total)", clients.len() + 1);
-                        clients.push(ws);
-                    }
-                    Err(_) => {}
+                if let Ok(ws) = accept(stream) {
+                    println!("Client connected ({} total)", clients.len() + 1);
+                    clients.push(ws);
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -294,9 +324,16 @@ fn main() {
         if do_step {
             sim.step(|s, dt| run_systems(s, dt, &mut exporter));
             frame += 1;
+            // Audit 5a item 2: scripted growth check once per tick (sim-time).
+            if config.scripted_population {
+                let n = scripted_growth.tick(&mut sim);
+                if n > 0 {
+                    println!("Scripted population: +{n} agents at frame {frame}");
+                }
+            }
         }
         // 6.2: refresh the dashboard metrics every 100 sim frames.
-        if frame % 100 == 0 {
+        if frame.is_multiple_of(100) {
             metrics_pending = true;
         }
 

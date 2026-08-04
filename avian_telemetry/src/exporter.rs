@@ -24,7 +24,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "csv" => Some(Format::Csv),
             "jsonl" => Some(Format::Jsonl),

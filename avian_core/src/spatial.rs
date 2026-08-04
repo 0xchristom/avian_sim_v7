@@ -46,8 +46,8 @@ impl SpatialHashGrid {
         let cx = (x / self.cell_size).floor() as i64;
         let cy = (y / self.cell_size).floor() as i64;
         // Offset by i32::MAX to make all coordinates non-negative before packing.
-        let ox = (cx as i64).wrapping_add(i32::MAX as i64);
-        let oy = (cy as i64).wrapping_add(i32::MAX as i64);
+        let ox = cx.wrapping_add(i32::MAX as i64);
+        let oy = cy.wrapping_add(i32::MAX as i64);
         ((ox as u64) << 32) | (oy as u64 & 0xFFFFFFFF)
     }
 
@@ -55,10 +55,7 @@ impl SpatialHashGrid {
     /// entity's cell for subsequent incremental updates.
     pub fn insert(&mut self, entity: Entity, pos: Vector2<f64>) {
         let key = self.hash(pos.x, pos.y);
-        self.cells
-            .entry(key)
-            .or_insert_with(SmallVec::new)
-            .push(entity);
+        self.cells.entry(key).or_default().push(entity);
         self.entity_cell.insert(entity, key);
     }
 
@@ -84,10 +81,7 @@ impl SpatialHashGrid {
             }
             None => {}
         }
-        self.cells
-            .entry(key)
-            .or_insert_with(SmallVec::new)
-            .push(entity);
+        self.cells.entry(key).or_default().push(entity);
         self.entity_cell.insert(entity, key);
         self.last_update_moves += 1;
         true

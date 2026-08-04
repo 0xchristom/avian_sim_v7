@@ -15,8 +15,10 @@ use nalgebra::Vector2;
 /// and every obstacle must surface in the snapshot.
 #[test]
 fn urban_map_builds_obstacles_and_snapshots_them() {
-    let mut config = SimulationConfig::default();
-    config.urban_obstacles = true;
+    let config = SimulationConfig {
+        urban_obstacles: true,
+        ..SimulationConfig::default()
+    };
     let sim = Simulation::new(42, config);
 
     assert_eq!(
@@ -61,8 +63,10 @@ fn empty_arena_by_default() {
 /// Spawn/patrol sampling must never hand out a point inside an obstacle.
 #[test]
 fn random_free_point_avoids_obstacles() {
-    let mut config = SimulationConfig::default();
-    config.urban_obstacles = true;
+    let config = SimulationConfig {
+        urban_obstacles: true,
+        ..SimulationConfig::default()
+    };
     let mut sim = Simulation::new(7, config);
 
     for _ in 0..200 {
@@ -114,8 +118,10 @@ fn cone_cast_occlusion_filter_hides_target() {
 /// unreachable, so the bird never eats; without it the bird arrives (~1450
 /// frames). This exercises obstacle colliders AND vision occlusion end-to-end.
 fn memory_bird_reaches_grain(building: bool, seed: u64, frames: u64) -> bool {
-    let mut config = SimulationConfig::default();
-    config.immigration_enabled = false; // deterministic single bird
+    let config = SimulationConfig {
+        immigration_enabled: false, // deterministic single bird
+        ..SimulationConfig::default()
+    };
     let mut sim = Simulation::new(seed, config);
     let uid = sim.next_uid_str();
     let e: Entity = avian_agent::gerontology::spawn_agent(
@@ -199,8 +205,10 @@ fn building_blocks_reaching_far_grain() {
 /// travel in the checkpoint rather than a component column).
 #[test]
 fn obstacles_survive_checkpoint_round_trip() {
-    let mut config = SimulationConfig::default();
-    config.urban_obstacles = true;
+    let config = SimulationConfig {
+        urban_obstacles: true,
+        ..SimulationConfig::default()
+    };
     let sim = Simulation::new(9, config);
     let path = std::env::temp_dir().join("avian_4_3_ckpt.bin");
     let path_str = path.to_str().unwrap().to_string();
@@ -234,9 +242,11 @@ fn obstacles_survive_checkpoint_round_trip() {
 #[test]
 fn urban_los_raycast_budget_stays_bounded() {
     fn raycasts_per_frame(agents: u32, frames: u32) -> u64 {
-        let mut config = SimulationConfig::default();
-        config.urban_obstacles = true;
-        config.immigration_enabled = false; // we spawn a fixed population ourselves
+        let config = SimulationConfig {
+            urban_obstacles: true,
+            immigration_enabled: false, // we spawn a fixed population ourselves
+            ..SimulationConfig::default()
+        };
         let mut sim = Simulation::new(2026, config);
         for _ in 0..agents {
             let x = sim.rng.gen_range(2.0..30.0);

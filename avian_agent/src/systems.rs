@@ -169,7 +169,11 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
     // entities every CACHE_PRUNE_FRAMES frames. Bounded and deterministic —
     // hecs entity ids are generation-aware, so a stale key can never alias a
     // reused slot, but it would still grow without bound over a long run.
-    if sim.time.frame % calibration::CACHE_PRUNE_FRAMES == 0 {
+    if sim
+        .time
+        .frame
+        .is_multiple_of(calibration::CACHE_PRUNE_FRAMES)
+    {
         let live: HashSet<Entity> = sim
             .world
             .query::<&Metabolism>()
@@ -361,7 +365,7 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         // positions, so the steering force stays smooth and the throttle is
         // deterministic (frame-based, no wall-clock input).
         let cached_nb = sim.neighbor_cache.get(&id);
-        let stable = cached_nb.map_or(false, |c| {
+        let stable = cached_nb.is_some_and(|c| {
             c.last_count >= calibration::NEIGHBOR_STABLE_MIN_COUNT
                 && (vel.0 - c.last_vel).norm() <= calibration::NEIGHBOR_STABLE_VEL_EPS
         });
@@ -370,7 +374,7 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         } else {
             1
         };
-        let neighbors_raw: Vec<(Entity, f64)> = if sim.time.frame % refresh_period == 0 {
+        let neighbors_raw: Vec<(Entity, f64)> = if sim.time.frame.is_multiple_of(refresh_period) {
             let raw = sim
                 .spatial_grid
                 .query_k_nearest(pos.0, 7, vision_range, &positions);
@@ -411,7 +415,7 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
             }
             physics
                 .cast_ray_to_static(pos.0, *target - pos.0, 1.0)
-                .map_or(false, |toi| toi < 1.0 - calibration::LOS_BLOCK_EPS)
+                .is_some_and(|toi| toi < 1.0 - calibration::LOS_BLOCK_EPS)
         };
         let visible_neighbors = cone_cast(
             pos.0,
@@ -419,7 +423,7 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
             vision.fov_degrees,
             vision_range,
             &targets,
-            &occluded,
+            occluded,
         );
         let visible_neighbor_entities: Vec<Entity> =
             visible_neighbors.iter().map(|(e, _, _)| *e).collect();
@@ -439,7 +443,7 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         // tick's list while the agent hasn't moved/rotated beyond tolerance and
         // the grain set is unchanged; otherwise recompute from the grain
         // spatial index (cone + LOS raycast only over local candidates).
-        let cache_fresh = sim.grain_vis_cache.get(&id).map_or(false, |c| {
+        let cache_fresh = sim.grain_vis_cache.get(&id).is_some_and(|c| {
             (c.pos - pos.0).norm() <= calibration::GRAIN_VIS_CACHE_POS_EPS
                 && (c.heading - head.0)
                     .abs()
@@ -479,7 +483,7 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
                     if has_obstacles
                         && physics
                             .cast_ray_to_static(pos.0, g_pos - pos.0, 1.0)
-                            .map_or(false, |toi| toi < 1.0 - calibration::LOS_BLOCK_EPS)
+                            .is_some_and(|toi| toi < 1.0 - calibration::LOS_BLOCK_EPS)
                     {
                         return None;
                     }

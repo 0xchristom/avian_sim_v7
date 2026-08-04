@@ -38,6 +38,7 @@ pub struct RLReward {
 }
 
 impl RLReward {
+    #[allow(clippy::too_many_arguments)]
     pub fn compute(
         dt: f32,
         energy_kj: f32,
@@ -169,18 +170,16 @@ pub fn state_to_observation(
         let dx = p[0] - agent.pos[0];
         let dy = p[1] - agent.pos[1];
         let d = (dx * dx + dy * dy).sqrt();
-        if nearest_pred.map_or(true, |(_, _)| true) {
-            // Keep the closest.
-            let keep = nearest_pred
-                .map(|(dx0, dy0)| {
-                    let d0 = (dx0 * dx0 + dy0 * dy0).sqrt();
-                    d < d0
-                })
-                .unwrap_or(true);
-            if keep {
-                nearest_pred = Some((dx, dy));
-                threat_mag = (1.0 / (1.0 + d)) as f32;
-            }
+        // Keep the closest.
+        let keep = nearest_pred
+            .map(|(dx0, dy0)| {
+                let d0 = (dx0 * dx0 + dy0 * dy0).sqrt();
+                d < d0
+            })
+            .unwrap_or(true);
+        if keep {
+            nearest_pred = Some((dx, dy));
+            threat_mag = (1.0 / (1.0 + d)) as f32;
         }
     }
     if let Some((dx, dy)) = nearest_pred {

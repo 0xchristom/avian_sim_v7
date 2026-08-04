@@ -149,12 +149,8 @@ impl TelemetryMetadata {
 }
 
 pub fn write_metadata(path: &Path, meta: &TelemetryMetadata) -> std::io::Result<()> {
-    let json = serde_json::to_string_pretty(meta).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("serialize metadata: {e}"),
-        )
-    })?;
+    let json = serde_json::to_string_pretty(meta)
+        .map_err(|e| std::io::Error::other(format!("serialize metadata: {e}")))?;
     std::fs::write(path, json)
 }
 
@@ -173,7 +169,7 @@ mod tests {
             .unwrap()
             .as_secs();
         let (y, m, d) = civil_from_days((secs / 86400) as i64);
-        assert!(y >= 2024 && y <= 2035, "year out of range: {y}");
+        assert!((2024..=2035).contains(&y), "year out of range: {y}");
         assert!((1..=12).contains(&m), "month out of range: {m}");
         assert!((1..=31).contains(&d), "day out of range: {d}");
     }

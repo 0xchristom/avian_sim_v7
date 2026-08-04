@@ -116,7 +116,13 @@ pub fn spawn_agent(
             hold_duration: 0.1,
             thrust_duration: 0.05,
         },
-        FeatherCondition(calibration::FEATHER_CONDITION_DEFAULT),
+        // Audit 5a item 1: sample the INITIAL feather condition per agent from
+        // the seeded RNG (uniform 0.6–1.0) instead of a flat constant. With a
+        // shared default, the deterministic decay makes every bird cross
+        // PREEN_FEATHER_THRESHOLD on the same tick — synchronized preening.
+        // Once desynchronized at spawn, identical per-agent decay/restore keep
+        // them desynchronized (the process is additive and deterministic).
+        FeatherCondition(0.6 + rng.gen_range(0.0..0.4)),
         PhysicsHandle(rb_handle),
         AgentUid(uid),
         // NOTE: `Alarm` + `AlarmPrev` are inserted via `world.insert` below —

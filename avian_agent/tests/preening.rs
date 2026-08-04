@@ -4,10 +4,12 @@
 
 use avian_agent::gerontology::spawn_agent;
 use avian_agent::systems::run_systems;
-use avian_core::components::{Age, FSMState, FeatherCondition};
+use avian_core::components::{Age, FSMState, FeatherCondition, Metabolism};
 use avian_core::{Simulation, SimulationConfig};
 use avian_telemetry::exporter::TelemetryExporter;
+use hecs::Entity;
 use nalgebra::Vector2;
+use std::collections::HashMap;
 
 #[test]
 fn test_low_feathers_triggers_preening_and_restores() {
@@ -83,5 +85,63 @@ fn test_preening_time_budget_share() {
         (0.03..=0.20).contains(&share),
         "preening share {:.1}% outside the ~10% time-budget band (3-20%)",
         share * 100.0
+    );
+}
+
+// Audit 5a item 1 regression: with a per-agent INITIAL feather value sampled
+// from the seeded RNG (0.6–1.0) instead of a flat constant, birds cross
+// PREEN_FEATHER_THRESHOLD on DIFFERENT ticks — not the same frame. This test
+// checks the actual failure mode: it counts the distinct ticks at which agents
+// FIRST enter Preening and requires more than one. (It is not enough to assert
+// "some birds are preening" — that would pass even when they all start
+// together.)
+#[test]
+fn test_preening_is_desynchronized_across_agents() {
+    // Immigration off keeps the population at exactly what we spawn, so the
+    // set of "first preening ticks" is stable for the whole window.
+    let config = SimulationConfig {
+        immigration_enabled: false,
+        ..SimulationConfig::default()
+    };
+    let mut sim = Simulation::new(11, config);
+    for _ in 0..30 {
+        let x = sim.rng.gen_range(2.0..30.0);
+        let y = sim.rng.gen_range(2.0..19.0);
+        let uid = sim.next_uid_str();
+        let e = spawn_agent(
+            &mut sim.world,
+            &mut sim.rng,
+            Vector2::new(x, y),
+            &mut sim.physics,
+            uid,
+        );
+        // Young + well-fed: the 2.7 Sick branch and starvation must not
+        // preempt the feather-driven Preening transition.
+        sim.world.get::<&mut Age>(e).unwrap().years = 1.0;
+        sim.world.get::<&mut Metabolism>(e).unwrap().energy_kj = 60.0;
+    }
+    let mut exporter = TelemetryExporter::new(usize::MAX);
+
+    // First tick (frame) each agent enters Preening.
+    let mut first_preen: HashMap<Entity, u64> = HashMap::new();
+    for tick in 0..4000u64 {
+        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        for (e, fsm) in sim.world.query::<&FSMState>().iter() {
+            if *fsm == FSMState::Preening && !first_preen.contains_key(&e) {
+                first_preen.insert(e, tick);
+            }
+        }
+    }
+
+    assert_eq!(
+        first_preen.len(),
+        30,
+        "every agent should have entered Preening within the window"
+    );
+    let distinct_ticks: std::collections::HashSet<u64> = first_preen.values().copied().collect();
+    assert!(
+        distinct_ticks.len() > 1,
+        "all {first_preen:?} agents entered Preening on the same tick — \
+         synchronized preening not fixed"
     );
 }
