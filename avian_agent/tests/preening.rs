@@ -145,3 +145,65 @@ fn test_preening_is_desynchronized_across_agents() {
          synchronized preening not fixed"
     );
 }
+
+// Regression: preening must stay desynchronized ACROSS a night. The old decay
+// ran unconditionally while Roost (higher priority than Preen) blocked the
+// restore, so every bird's feathers clamped to 0 overnight and ALL agents
+// entered Preening together at dawn, permanently locking them in phase.
+// No per-tick must ever have the whole population preening simultaneously.
+#[test]
+fn test_preening_stays_desynchronized_across_night() {
+    // Short day + dt = 1 s/frame so a full night fits in a fast window:
+    // day_length 100 s → night (light < 0.3) spans roughly sim-seconds 34→66
+    // from a noon start; 120 frames covers it end to end. All rates are per
+    // sim-second, so the dt choice is behaviourally invariant.
+    let config = SimulationConfig {
+        immigration_enabled: false,
+        day_length_sim_s: 100.0,
+        dt: 1.0,
+        ..SimulationConfig::default()
+    };
+    let mut sim = Simulation::new(11, config);
+    for _ in 0..30 {
+        let x = sim.rng.gen_range(2.0..30.0);
+        let y = sim.rng.gen_range(2.0..19.0);
+        let uid = sim.next_uid_str();
+        let e = spawn_agent(
+            &mut sim.world,
+            &mut sim.rng,
+            Vector2::new(x, y),
+            &mut sim.physics,
+            uid,
+        );
+        // Young + well-fed so Sick/starvation never preempts Preening.
+        sim.world.get::<&mut Age>(e).unwrap().years = 1.0;
+        sim.world.get::<&mut Metabolism>(e).unwrap().energy_kj = 60.0;
+    }
+    let mut exporter = TelemetryExporter::new(usize::MAX);
+
+    let mut max_simultaneous = 0usize;
+    let mut saw_night = false;
+    for _ in 0..120u64 {
+        sim.step(|s, dt| run_systems(s, dt, &mut exporter));
+        if sim.environment.light_level < avian_core::calibration::NIGHT_REST_LIGHT_THRESHOLD {
+            saw_night = true;
+        }
+        let mut preening = 0usize;
+        for (_e, fsm) in sim.world.query::<&FSMState>().iter() {
+            if *fsm == FSMState::Preening {
+                preening += 1;
+            }
+        }
+        max_simultaneous = max_simultaneous.max(preening);
+    }
+
+    assert!(
+        saw_night,
+        "test never reached night — day_length too long for the window"
+    );
+    assert!(
+        max_simultaneous < 30,
+        "whole population preened simultaneously ({max_simultaneous} of 30) — \
+         night reset every bird's feather phase; preening is synchronized"
+    );
+}

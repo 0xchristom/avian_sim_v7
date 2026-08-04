@@ -47,7 +47,7 @@ day_length_sim_s = 2400.0
 # and spawns +2/+4/+5/+5 at 2/5/10/15 simulated minutes (totals 6/10/15/20),
 # keyed on sim-time so it works at any speed. Immigration is disabled while
 # active so the schedule is the sole population driver. Same as --scripted-population.
-# scripted_population = true
+scripted_population = true
 
 # Explicit obstacle layout (replaces the built-in urban map when non-empty).
 # kind = "Building" | "Wall" | "Water" | "Tree"

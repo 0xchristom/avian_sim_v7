@@ -290,12 +290,25 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
         &mut FeatherCondition,
     )>() {
         // 2.6 feather decay — rain multiplies the rate (hook for 4.4).
-        let rain_mult = if sim.environment.weather == Weather::Rain {
-            calibration::RAIN_FEATHER_DECAY_MULTIPLIER
-        } else {
-            1.0
-        };
-        feather.0 = (feather.0 - calibration::FEATHER_DECAY_RATE_S * dt * rain_mult).max(0.0);
+        // Gate on daylight: a roosting (sleeping) bird's feathers do NOT
+        // degrade. Decaying unconditionally would let every bird clamp at 0
+        // overnight and then preen together at dawn — synchronized preening
+        // that survives the per-agent spawn desync. Halt decay below the
+        // roost threshold so each bird keeps its phase across the night.
+        // 2.6 feather decay — rain multiplies the rate (hook for 4.4).
+        // Gate on daylight: a roosting (sleeping) bird's feathers do NOT
+        // degrade. Decaying unconditionally would let every bird clamp at 0
+        // overnight and then preen together at dawn — synchronized preening
+        // that survives the per-agent spawn desync. Halt decay below the
+        // roost threshold so each bird keeps its phase across the night.
+        if sim.environment.light_level >= calibration::NIGHT_REST_LIGHT_THRESHOLD {
+            let rain_mult = if sim.environment.weather == Weather::Rain {
+                calibration::RAIN_FEATHER_DECAY_MULTIPLIER
+            } else {
+                1.0
+            };
+            feather.0 = (feather.0 - calibration::FEATHER_DECAY_RATE_S * dt * rain_mult).max(0.0);
+        }
 
         // Fix #4: Age progression — 1 sim second = 1 real second of aging.
         age.years += dt / (365.0 * 24.0 * 3600.0); // seconds to years

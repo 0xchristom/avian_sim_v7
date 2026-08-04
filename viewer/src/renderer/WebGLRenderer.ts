@@ -157,6 +157,9 @@ export class WebGLRenderer {
     const bgLoader = new THREE.TextureLoader();
     bgLoader.setCrossOrigin('anonymous');
     this.backgroundTexture = bgLoader.load('/assets/background-no-fireflies.jpg');
+    // r160 default output is sRGB; without tagging the texture sRGB the image
+    // is interpreted as linear → washed-out/flat colors.
+    this.backgroundTexture.colorSpace = THREE.SRGBColorSpace;
     const bgMat = new THREE.MeshBasicMaterial({
       map: this.backgroundTexture,
       depthTest: false,
@@ -182,6 +185,14 @@ export class WebGLRenderer {
     const grid = new THREE.GridHelper(64, 64, 0x333333, 0x222222);
     grid.rotation.x = Math.PI / 2;
     grid.position.set(16, 10.5, -1);
+    // 30% opacity so the background photo shows through instead of the grid
+    // dominating the arena.
+    const gridMats = Array.isArray(grid.material) ? grid.material : [grid.material];
+    for (const m of gridMats) {
+      m.transparent = true;
+      m.opacity = 0.3;
+      m.depthWrite = false;
+    }
     this.scene.add(grid);
 
     // 6.5: per-agent ground shadow (soft dark ellipse, slightly larger than body).
