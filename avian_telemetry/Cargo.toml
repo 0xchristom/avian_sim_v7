@@ -1,9 +1,0 @@
-[package]
-name = "avian_telemetry"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-avian_core = { path = "../avian_core" }
-serde = { workspace = true }
-serde_json = { workspace = true }
