@@ -36,6 +36,9 @@ pub fn default_weights() -> BoidWeights {
 /// foraging drops cohesion to ZERO (Audit 4 §9.8: a foraging bird is influenced
 /// by separation only — it is never pulled toward the flock centroid, so it
 /// can search on its own instead of orbiting the group's center of mass).
+/// Audit 5a (Sprint 2): `Spacer` (free-roam wander) scales cohesion down by
+/// `BOID_SPACER_COHESION_MULTIPLIER` so a wanderer can actually leave a cluster
+/// instead of being gravitationally captured forever.
 pub fn weights_for_state(state: FSMState, base: &BoidWeights) -> BoidWeights {
     match state {
         FSMState::Foraging => BoidWeights {
@@ -46,6 +49,10 @@ pub fn weights_for_state(state: FSMState, base: &BoidWeights) -> BoidWeights {
             separation: base.separation * 1.5,
             alignment: 0.0,
             cohesion: 0.0,
+        },
+        FSMState::Spacer => BoidWeights {
+            cohesion: base.cohesion * calibration::BOID_SPACER_COHESION_MULTIPLIER,
+            ..*base
         },
         _ => *base,
     }

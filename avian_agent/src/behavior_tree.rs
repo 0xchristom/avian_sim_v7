@@ -77,6 +77,23 @@ pub struct AgentContext<'a> {
     pub forage_hunger_threshold: f64,
     // Phase 9 (Audit 3): building-thermal updraft zones (from `sim.thermals`).
     pub thermals: &'a [ThermalZone],
+    // Audit 5a (Sprint 3): arena size (m), so wanderers can steer away from the
+    // edges instead of clinging to a wall. Filled from `sim.config`.
+    pub world_dims: Vector2<f64>,
+}
+
+/// Audit 5a (Sprint 3): blend `from` toward `target` by fraction `t` of the
+/// shortest angular gap, staying in `[-π, π]`. Used to aim a wanderer's Lévy
+/// step at the arena interior instead of a wall.
+fn blend_angle_toward(from: f64, target: f64, t: f64) -> f64 {
+    let mut diff = target - from;
+    while diff > std::f64::consts::PI {
+        diff -= std::f64::consts::TAU;
+    }
+    while diff < -std::f64::consts::PI {
+        diff += std::f64::consts::TAU;
+    }
+    from + diff * t
 }
 
 #[derive(Debug)]
@@ -335,15 +352,74 @@ fn spacer_action(ctx: &mut AgentContext) -> BTStatus {
     *ctx.fsm = FSMState::Spacer;
     let speed = ctx.mobility.max_speed_ms * 0.8;
 
+    // Audit 5a (Sprint 3): boundary awareness for the wanderer. If we are inside
+    // the wall-avoid margin, bias the target heading toward the interior so a
+    // CRW/Lévy step never aims a pigeon straight at the wall (which physics then
+    // turns into permanent tangential sliding).
+    let margin = calibration::WALL_AVOID_MARGIN_M;
+    let (w, h) = (ctx.world_dims.x, ctx.world_dims.y);
+    let (x, y) = (ctx.pos.0.x, ctx.pos.0.y);
+    // Compose a repulsion direction (same shape as the steering term in
+    // run_systems) and, if non-trivial, the interior angle to steer toward.
+    let mut repel: Vector2<f64> = Vector2::zeros();
+    if x < margin {
+        repel.x += 1.0;
+    } else if x > w - margin {
+        repel.x -= 1.0;
+    }
+    if y < margin {
+        repel.y += 1.0;
+    } else if y > h - margin {
+        repel.y -= 1.0;
+    }
+    let interior_angle = if repel.norm() < 1e-6 {
+        None
+    } else {
+        Some(repel.y.atan2(repel.x))
+    };
+
     if ctx.levy.remaining_dist <= 0.0 {
         // Audit 4 §9.8: the Lévy step cap is now WANDER_LEVY_MAX_STEP_M (15 m),
         // not the old hardcoded 5 m — the raw heavy-tailed distribution alone
         // still maxed at 5 m, which could never escape a cluster's gravity well.
         let dist = levy_step(ctx.rng, 2.0).min(calibration::WANDER_LEVY_MAX_STEP_M);
-        ctx.levy.target_heading = crw_direction(ctx.head.0, ctx.rng, 2.0);
+        // Audit 5a (Sprint 3): a fresh step near a wall starts aimed at the
+        // interior (angle blend toward the repulsion direction) so the agent
+        // turns away instead of marching at the wall.
+        let base = crw_direction(ctx.head.0, ctx.rng, 2.0);
+        ctx.levy.target_heading = match interior_angle {
+            Some(t) => blend_angle_toward(base, t, 0.5),
+            None => base,
+        };
         ctx.levy.remaining_dist = dist;
     } else {
-        ctx.levy.remaining_dist -= speed * ctx.dt;
+        // Audit 5a (Sprint 3): two guards against edge-clinging on an ACTIVE step.
+        // (1) If we are inside the margin pushing toward the wall, steer the
+        //     target heading toward the interior instead of burning the step
+        //     while stuck — the bird turns away and the step then advances once
+        //     its heading no longer faces the wall.
+        // (2) Otherwise the step advances normally.
+        let heading = Vector2::new(ctx.head.0.cos(), ctx.head.0.sin());
+        let mut pointing_outward = false;
+        if x < margin {
+            pointing_outward |= heading.x < 0.0;
+        }
+        if x > w - margin {
+            pointing_outward |= heading.x > 0.0;
+        }
+        if y < margin {
+            pointing_outward |= heading.y < 0.0;
+        }
+        if y > h - margin {
+            pointing_outward |= heading.y > 0.0;
+        }
+        if pointing_outward {
+            if let Some(t) = interior_angle {
+                ctx.levy.target_heading = blend_angle_toward(ctx.levy.target_heading, t, 0.5);
+            }
+        } else {
+            ctx.levy.remaining_dist -= speed * ctx.dt;
+        }
     }
 
     let mut diff = ctx.levy.target_heading - ctx.head.0;

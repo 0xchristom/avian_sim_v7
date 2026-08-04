@@ -86,6 +86,14 @@ interface SimStore {
   lastReceivedAt: number;
   currentReceivedAt: number;
   setSnapshot: (s: SimulationSnapshot) => void;
+  // Audit 5a (Sprint 4): a THROTTLED (~4 Hz) view of the snapshot for React.
+  // Subscribing the root App to the full 62.5 Hz snapshot re-rendered the whole
+  // React tree (including the Dashboard's per-pigeon cards) at the snapshot
+  // rate. `ui` is refreshed at most every 250 ms, so React work drops to ~4
+  // re-renders/s while the rAF render loop keeps reading the live `snapshot`
+  // via getState(). The agent/predator arrays are shared references (not
+  // copies), so the renderer and Dashboard always see the same data.
+  ui: SimulationSnapshot | null;
   eventLog: EventLogEntry[];
   // 6.1: append scenario events (from `{"type":"event_log",...}` WS messages).
   appendEvents: (frame: number, events: unknown[]) => void;
@@ -93,19 +101,45 @@ interface SimStore {
   setMetrics: (m: Metrics) => void;
 }
 
+// Audit 5a (Sprint 4): React-facing snapshot throttle — 4 Hz (250 ms). The
+// renderer never touches this; it reads the live snapshot via getState().
+const UI_REFRESH_MS = 250;
+let lastUiAt = 0;
+
 export const useSimulationStore = create<SimStore>((set) => ({
   snapshot: null,
   previousSnapshot: null,
   lastReceivedAt: 0,
   currentReceivedAt: 0,
+  ui: null,
   setSnapshot: (s) =>
     set((state) => {
       const now = performance.now();
+      // Only re-emit `ui` at ~4 Hz. Everything else (double-buffer + arrival
+      // stamps) still updates per snapshot for the render loop.
+      let ui = state.ui;
+      if (now - lastUiAt >= UI_REFRESH_MS) {
+        lastUiAt = now;
+        ui = {
+          frame: s.frame,
+          time_us: s.time_us,
+          light_level: s.light_level,
+          weather: s.weather,
+          weather_intensity: s.weather_intensity,
+          agents: s.agents,
+          grains: s.grains,
+          predators: s.predators,
+          obstacles: s.obstacles,
+          agent_count: s.agent_count,
+          dead_count: s.dead_count,
+        };
+      }
       return {
         snapshot: s,
         previousSnapshot: state.snapshot,
         lastReceivedAt: state.snapshot ? state.currentReceivedAt : 0,
         currentReceivedAt: now,
+        ui,
       };
     }),
   eventLog: [],

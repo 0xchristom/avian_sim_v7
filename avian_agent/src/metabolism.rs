@@ -55,17 +55,40 @@ pub fn metabolism_system(
         meta.energy_kj -= actual;
         total_drained += actual;
 
-        // Trawienie
-        if meta.crop_count > 0 && meta.gizzard_count < 10 {
-            let transfer_rate = 0.1 * dt;
-            let to_transfer = (transfer_rate as u32).min(meta.crop_count);
-            meta.crop_count -= to_transfer;
-            meta.gizzard_count += to_transfer;
+        // Trawienie (digestion), Audit 5a (Sprint 1).
+        // The old `(0.1 * dt) as u32` truncated to 0 at dt = 1/120, so no grain
+        // ever left the crop and hunger could only fall. We now accumulate the
+        // per-tick fraction in `digest_carry_s` and transfer one whole grain
+        // each time it crosses 1.0 — deterministic (no RNG), and identical at
+        // any dt.
+        if meta.crop_count > 0 && meta.gizzard_count < calibration::GIZZARD_CAPACITY_GRANS {
+            meta.digest_carry_s += calibration::DIGESTION_RATE_GRANS_S * dt;
+            while meta.digest_carry_s >= 1.0
+                && meta.crop_count > 0
+                && meta.gizzard_count < calibration::GIZZARD_CAPACITY_GRANS
+            {
+                meta.digest_carry_s -= 1.0;
+                meta.crop_count -= 1;
+                meta.gizzard_count += 1;
 
-            let energy_from_food = to_transfer as f64 * 0.5;
-            let tef_loss = 0.1 * energy_from_food;
-            meta.energy_kj += energy_from_food - tef_loss;
-            total_digested += energy_from_food - tef_loss;
+                let energy_from_food = calibration::GRAIN_ENERGY_KJ;
+                let tef_loss = 0.1 * energy_from_food;
+                meta.energy_kj += energy_from_food - tef_loss;
+                total_digested += energy_from_food - tef_loss;
+            }
+        }
+
+        // Audit 5a (Sprint 1): the gizzard is a one-way buffer capped at
+        // GIZZARD_CAPACITY_GRANS. Without a drain it filled to the cap and
+        // blocked the crop→gizzard transfer forever (a second deadlock on top
+        // of the truncation bug). Draining back into the bloodstream keeps the
+        // pipeline flowing and lets blood glucose fall so hunger rises again.
+        if meta.gizzard_count > 0 {
+            meta.gizzard_drain_carry_s += calibration::GIZZARD_DRAIN_RATE_GRANS_S * dt;
+            while meta.gizzard_drain_carry_s >= 1.0 && meta.gizzard_count > 0 {
+                meta.gizzard_drain_carry_s -= 1.0;
+                meta.gizzard_count -= 1;
+            }
         }
 
         let blood_glucose = meta.gizzard_count as f64 * 0.5;

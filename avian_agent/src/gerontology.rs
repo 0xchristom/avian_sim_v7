@@ -92,6 +92,8 @@ pub fn spawn_agent(
             gizzard_count: 3,
             crop_max,
             last_peck_time: 0.0,
+            digest_carry_s: 0.0,
+            gizzard_drain_carry_s: 0.0,
         },
         FSMState::Spacer,
         LevyState {

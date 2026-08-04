@@ -33,6 +33,18 @@ pub struct Metabolism {
     pub gizzard_count: u32,
     pub crop_max: u32,
     pub last_peck_time: f64,
+    /// Audit 5a (Sprint 1): fractional accumulator for the crop→gizzard
+    /// digestion transfer. At dt = 1/120 the old `(0.1*dt as u32)` truncated
+    /// to 0, so no grain ever moved and hunger could only fall. Each tick we
+    /// accumulate `DIGESTION_RATE_GRANS_S * dt` and transfer one whole grain
+    /// each time the carry crosses 1.0 (deterministic, no RNG).
+    pub digest_carry_s: f64,
+    /// Audit 5a (Sprint 1): fractional accumulator for the gizzard→blood
+    /// drain. The gizzard was a one-way buffer capped at 10 — once full, the
+    /// crop→gizzard transfer blocked forever. Draining the gizzard back into
+    /// the bloodstream lets a full crop keep emptying and lets blood glucose
+    /// (and therefore hunger) fall again.
+    pub gizzard_drain_carry_s: f64,
 }
 
 /// Sprint 2 (Audit 5, B20): `repr(u8)` + `ALL` so metrics aggregate FSM by

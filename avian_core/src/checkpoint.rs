@@ -322,7 +322,10 @@ pub struct Checkpoint {
 
 /// 5: +SimulationTime.frac_us (B27 sub-µs remainder), so the time wire format
 /// changed; old v4 checkpoints are rejected.
-pub const CHECKPOINT_VERSION: u32 = 5;
+/// 6: +Metabolism.digest_carry_s / gizzard_drain_carry_s (Audit 5a Sprint 1) —
+/// fractional digestion accumulators; the component layout changed, so old v5
+/// checkpoints are rejected.
+pub const CHECKPOINT_VERSION: u32 = 6;
 
 /// 8-byte magic prefix written before the checksum + bincode payload in
 /// `save_checkpoint`. Guards against loading a non-checkpoint file.

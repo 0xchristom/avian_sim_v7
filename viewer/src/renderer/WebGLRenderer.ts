@@ -82,6 +82,32 @@ export class WebGLRenderer {
   // per-frame string keys.
   private lastGrains: Array<[number, number]> | null = null;
   private lastPreds: any[] | null = null;
+  // Audit 5a (Sprint 4): interpolation is allocation-free in steady state.
+  // Scratch Maps + a pooled result-array of reusable agent/predator objects
+  // (grow-only, mutated in place) replace the per-frame `new Map` + `.map()`
+  // + `{...curr}` that fired whenever alpha < 1 (i.e. basically every frame
+  // between arrivals). Reused objects are only valid for the current render()
+  // call — every consumer below uses them synchronously.
+  private prevAgentMap = new Map<string, any>();
+  private prevPredMap = new Map<string, any>();
+  private interpAgents: any[] = [];
+  private interpPredators: any[] = [];
+  // Audit 5a (Sprint 4): per-UID morph color cached instead of re-splitting
+  // the uid string and hashing it for every agent every frame.
+  private uidColorCache = new Map<string, number>();
+  // Audit 5a (Sprint 4): obstacle cache — the static obstacle quads are only
+  // rebuilt when the id/kind/bounds actually change (the old code disposed and
+  // recreated all geometry+material every single frame). Holds the previous
+  // obstacles array for an allocation-free elementwise dirty check.
+  private lastObstacles: Array<{ id: number; kind: string; min: [number, number]; max: [number, number] }> | null = null;
+  // Audit 5a (Sprint 4): neighbor-line scratch array (reused) + last-uploaded
+  // values so needsUpdate is only set when the pair set actually changed.
+  private neighborLineScratch: number[] = [];
+  private lastNeighborLineValues: Float32Array | null = null;
+  // Audit 5a (Sprint 4): pooled selection markers — one shared geometry +
+  // material, meshes reused/grown instead of create+dispose every frame.
+  private selectionMarkerGeom: THREE.RingGeometry;
+  private selectionMarkerMat: THREE.MeshBasicMaterial;
 
   // Visual constants (renderer-only; ground truth lives in calibration.rs).
   private static readonly FOV_CONE_RADIUS = 3.0;
@@ -128,18 +154,24 @@ export class WebGLRenderer {
   // Audit 3 Phase 4: interpolate one entity between the previous and current
   // WS snapshots at alpha ∈ [0,1]. Position is lerped; heading is slerped
   // (shortest-arc) so a bird spinning past ±π never whips the long way around.
-  // Returns a lightweight copy of the current snapshot entry carrying the
-  // interpolated pos/heading — every other field is shared, not cloned.
-  private static resolveAgent(prev: any, curr: any, alpha: number): any {
-    const pos: [number, number] = [
-      prev.pos[0] + (curr.pos[0] - prev.pos[0]) * alpha,
-      prev.pos[1] + (curr.pos[1] - prev.pos[1]) * alpha,
-    ];
+  // Audit 5a (Sprint 4): writes into a pooled `target` object (its `pos` tuple
+  // is reused) instead of returning a fresh `{...curr}` — zero allocation in
+  // the per-frame interpolation path. Every other field is shared, not cloned.
+  private static resolveAgent(prev: any, curr: any, alpha: number, target: any): any {
+    const pos: [number, number] = target.pos;
+    pos[0] = prev.pos[0] + (curr.pos[0] - prev.pos[0]) * alpha;
+    pos[1] = prev.pos[1] + (curr.pos[1] - prev.pos[1]) * alpha;
     const twoPi = Math.PI * 2;
     let d = curr.heading - prev.heading;
     d = (((d + Math.PI) % twoPi) + twoPi) % twoPi - Math.PI; // wrap to (-π, π]
     const heading = prev.heading + d * alpha;
-    return { ...curr, pos, heading };
+    // Copy every field except pos/heading from `curr` (references shared).
+    for (const k in curr) {
+      if (k !== 'pos' && k !== 'heading') target[k] = curr[k];
+    }
+    target.pos = pos;
+    target.heading = heading;
+    return target;
   }
 
   constructor(canvas: HTMLCanvasElement) {
@@ -298,6 +330,12 @@ export class WebGLRenderer {
       side: THREE.DoubleSide,
     });
 
+    // Audit 5a (Sprint 4): selection-marker ring — one shared geometry +
+    // material for the whole pool, so marking does not create+dispose GPU
+    // buffers every frame (see updateSelectionMarkers).
+    this.selectionMarkerGeom = new THREE.RingGeometry(0.62, 0.72, 24);
+    this.selectionMarkerMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, transparent: true, opacity: 0.9, depthTest: false });
+
     // 6.1: flock neighbor connection lines. One dynamic buffer; capacity grows
     // only when more segments than the current allocation are needed.
     this.neighborGeom = new THREE.BufferGeometry();
@@ -383,22 +421,31 @@ export class WebGLRenderer {
 
   // 6.6: grow an instanced mesh's buffers when it needs more instances than
   // the initial capacity. Keeps `count` within capacity so Three never drops
-  // instances silently at high agent counts.
+  // instances silently at high agent counts. Audit 5a (Sprint 4): the backing
+  // Float32Array is swapped IN PLACE on the same InstancedBufferAttribute
+  // (data copied with .set) instead of replacing the attribute — three r160
+  // has no attribute.dispose(), so a replaced attribute's GL buffer would be
+  // orphaned forever. Reusing the attribute lets the renderer re-upload the
+  // enlarged buffer via needsUpdate with zero leak.
   private ensureCapacity(mesh: THREE.InstancedMesh, needed: number) {
     if (needed <= mesh.count) return;
     const capacity = Math.max(needed, mesh.instanceMatrix.count * 2);
-    const newMatrices = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 16), 16);
-    if (mesh.instanceMatrix.array) {
-      (newMatrices.array as Float32Array).set(mesh.instanceMatrix.array as Float32Array);
-    }
-    mesh.instanceMatrix = newMatrices;
-    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    const matrix = mesh.instanceMatrix;
+    const oldArray = matrix.array as Float32Array;
+    const newArray = new Float32Array(capacity * 16);
+    newArray.set(oldArray.subarray(0, mesh.count * 16));
+    matrix.array = newArray;
+    (matrix as { count: number }).count = newArray.length / 16;
+    matrix.needsUpdate = true;
     // Instance colors (morph/FSM tints) must grow too or setColorAt is dropped.
     if (mesh.instanceColor) {
-      const old = mesh.instanceColor as THREE.InstancedBufferAttribute;
-      const newColors = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
-      (newColors.array as Float32Array).set(old.array as Float32Array);
-      mesh.instanceColor = newColors;
+      const color = mesh.instanceColor as THREE.InstancedBufferAttribute;
+      const oldColor = color.array as Float32Array;
+      const newColor = new Float32Array(capacity * 3);
+      newColor.set(oldColor.subarray(0, mesh.count * 3));
+      color.array = newColor;
+      (color as { count: number }).count = newColor.length / 3;
+      color.needsUpdate = true;
     }
     mesh.count = capacity;
   }
@@ -443,21 +490,50 @@ export class WebGLRenderer {
     // snapshot arrays straight through, so render() does zero per-frame
     // allocation on the agent/predator hot path (this was the dominant
     // client-side GC source during long sessions).
+    // Audit 5a (Sprint 4): even when alpha < 1, the interpolation is now
+    // allocation-free — scratch Maps + a pooled, grow-only result array (each
+    // slot an object mutated in place, not a fresh `{...curr}`) are reused
+    // across frames.
     let effectiveAgents: any[] = snapshot.agents;
     let effectivePredators: any[] = snapshot.predators || [];
     if (previousSnapshot && alpha < 1) {
-      const prevAgents = new Map<string, any>();
+      const prevAgents = this.prevAgentMap;
+      prevAgents.clear();
       for (const a of previousSnapshot.agents || []) prevAgents.set(a.uid, a);
-      effectiveAgents = snapshot.agents.map((a: any) => {
-        const p = prevAgents.get(a.uid);
-        return p ? WebGLRenderer.resolveAgent(p, a, alpha) : a;
-      });
-      const prevPreds = new Map<string, any>();
+      const src = snapshot.agents;
+      if (this.interpAgents.length < src.length) {
+        // Grow the pool (rare: population increases) — pooled slots carry a
+        // reusable pos tuple; every other field is copied in per frame.
+        const base = this.interpAgents.length;
+        for (let i = base; i < src.length; i++) this.interpAgents[i] = { pos: [0, 0] };
+      } else if (this.interpAgents.length > src.length) {
+        this.interpAgents.length = src.length; // trim for a shrink (no alloc)
+      }
+      for (let i = 0; i < src.length; i++) {
+        const p = prevAgents.get(src[i].uid);
+        this.interpAgents[i] = p
+          ? WebGLRenderer.resolveAgent(p, src[i], alpha, this.interpAgents[i])
+          : src[i];
+      }
+      effectiveAgents = this.interpAgents;
+
+      const prevPreds = this.prevPredMap;
+      prevPreds.clear();
       for (const pp of previousSnapshot.predators || []) prevPreds.set(pp.uid, pp);
-      effectivePredators = (snapshot.predators || []).map((pp: any) => {
-        const p = prevPreds.get(pp.uid);
-        return p ? WebGLRenderer.resolveAgent(p, pp, alpha) : pp;
-      });
+      const psrc = snapshot.predators || [];
+      if (this.interpPredators.length < psrc.length) {
+        const base = this.interpPredators.length;
+        for (let i = base; i < psrc.length; i++) this.interpPredators[i] = { pos: [0, 0] };
+      } else if (this.interpPredators.length > psrc.length) {
+        this.interpPredators.length = psrc.length;
+      }
+      for (let i = 0; i < psrc.length; i++) {
+        const p = prevPreds.get(psrc[i].uid);
+        this.interpPredators[i] = p
+          ? WebGLRenderer.resolveAgent(p, psrc[i], alpha, this.interpPredators[i])
+          : psrc[i];
+      }
+      effectivePredators = this.interpPredators;
     }
 
     // 6.6: grow instance capacity once (if the population exceeded the pool).
@@ -513,8 +589,16 @@ export class WebGLRenderer {
         dummyBody.updateMatrix();
         this.birdBodyMesh.setMatrixAt(i, dummyBody.matrix);
         // 6.5: per-instance morph color (gray/brown/white from UID hash).
-        const hash = agent.uid.split('').reduce((acc: number, c: string) => acc + c.charCodeAt(0), 0);
-        bodyColor.setHex(MORPH_COLORS[hash % MORPH_COLORS.length]);
+        // Audit 5a (Sprint 4): hash computed once per uid, cached — the old
+        // `uid.split('').reduce(...)` allocated a string array per agent per
+        // frame.
+        let morph = this.uidColorCache.get(agent.uid);
+        if (morph === undefined) {
+          const hash = agent.uid.split('').reduce((acc: number, c: string) => acc + c.charCodeAt(0), 0);
+          morph = MORPH_COLORS[hash % MORPH_COLORS.length];
+          this.uidColorCache.set(agent.uid, morph);
+        }
+        bodyColor.setHex(morph);
         this.birdBodyMesh.setColorAt(i, bodyColor);
 
         // 6.5: FSM state ring under the bird.
@@ -587,7 +671,10 @@ export class WebGLRenderer {
     if (this.agentCache.size > n) {
       const live = new Set(effectiveAgents.map((a: any) => a.uid));
       for (const uid of this.agentCache.keys()) {
-        if (!live.has(uid)) this.agentCache.delete(uid);
+        if (!live.has(uid)) {
+          this.agentCache.delete(uid);
+          this.uidColorCache.delete(uid); // Audit 5a: keep morph cache bounded
+        }
       }
     }
 
@@ -681,8 +768,12 @@ export class WebGLRenderer {
 
   // 6.1: draw line segments between every agent pair within the flock radius.
   // O(n²) at 30 agents is trivial (≤ 435 pairs); fine for the research view.
+  // Audit 5a (Sprint 4): writes into a reused scratch array (no per-frame
+  // `new Array`) and uploads to the GPU only when the pair set actually
+  // changed (steady-state flocks are stable, so most frames skip the upload).
   private updateNeighborLines(agents: any[]) {
-    const pairs: number[] = [];
+    const scratch = this.neighborLineScratch;
+    scratch.length = 0;
     const r = WebGLRenderer.FLOCK_LINE_RADIUS;
     for (let i = 0; i < agents.length; i++) {
       const a = agents[i];
@@ -691,11 +782,11 @@ export class WebGLRenderer {
         const dx = a.pos[0] - b.pos[0];
         const dy = a.pos[1] - b.pos[1];
         if (dx * dx + dy * dy <= r * r) {
-          pairs.push(a.pos[0], a.pos[1], 0.25, b.pos[0], b.pos[1], 0.25);
+          scratch.push(a.pos[0], a.pos[1], 0.25, b.pos[0], b.pos[1], 0.25);
         }
       }
     }
-    const count = pairs.length / 3;
+    const count = scratch.length / 3;
     let attr = this.neighborGeom.getAttribute('position') as THREE.BufferAttribute;
     if (!attr || attr.count < count) {
       const capacity = Math.max(count * 3, 3);
@@ -703,9 +794,25 @@ export class WebGLRenderer {
       this.neighborGeom.setAttribute('position', attr);
     }
     if (count > 0) {
-      (attr.array as Float32Array).set(pairs);
+      (attr.array as Float32Array).set(scratch);
     }
-    attr.needsUpdate = true;
+    // Dirty check: only flag needsUpdate when length or values changed.
+    const last = this.lastNeighborLineValues;
+    let dirty = !last || last.length !== scratch.length;
+    if (!dirty) {
+      const lv = last as Float32Array;
+      for (let k = 0; k < scratch.length; k++) {
+        if (lv[k] !== scratch[k]) { dirty = true; break; }
+      }
+    }
+    if (dirty) {
+      if (!last || last.length !== scratch.length) {
+        this.lastNeighborLineValues = new Float32Array(scratch);
+      } else {
+        (last as Float32Array).set(scratch);
+      }
+      attr.needsUpdate = true;
+    }
     this.neighborGeom.setDrawRange(0, count);
     this.neighborLines.frustumCulled = false;
   }
@@ -743,6 +850,13 @@ export class WebGLRenderer {
     const targets = new Set<string>();
     if (hoveredUid) targets.add(hoveredUid);
     selectedUids.forEach((u) => targets.add(u));
+    // Audit 5a (Sprint 4): nothing to show — hide the pool and bail before
+    // allocating the filtered cone-agents array (every frame in the common
+    // no-hover/no-selection case).
+    if (targets.size === 0) {
+      for (const m of this.fovCones) m.visible = false;
+      return;
+    }
 
     const coneAgents = agents.filter((a) => targets.has(a.uid));
 
@@ -784,12 +898,33 @@ export class WebGLRenderer {
     return opacity;
   }
 
-  // 4.3: rebuild the static obstacle quads from the snapshot each frame.
-  // Obstacles are few (≤ a handful), so full rebuild is cheaper than a
-  // diffed pool and avoids any stale-geometry state.
+  // 4.3: draw the static urban obstacles. Obstacles are static — they only
+  // change when the scenario spawns/removes one, so the full rebuild (which
+  // disposes + recreates every quad's geometry/material) runs only when the
+  // id/kind/bounds actually differ from the previous frame. Audit 5a (Sprint
+  // 4): before, this disposed/recreated GPU buffers EVERY frame.
   private updateObstacles(
     obstacles: Array<{ id: number; kind: string; min: [number, number]; max: [number, number] }>,
   ) {
+    const prev = this.lastObstacles;
+    if (prev) {
+      let same = prev.length === obstacles.length;
+      if (same) {
+        for (let i = 0; i < obstacles.length; i++) {
+          const a = prev[i];
+          const b = obstacles[i];
+          if (a.id !== b.id || a.kind !== b.kind
+            || a.min[0] !== b.min[0] || a.min[1] !== b.min[1]
+            || a.max[0] !== b.max[0] || a.max[1] !== b.max[1]) {
+            same = false;
+            break;
+          }
+        }
+      }
+      if (same) return; // nothing changed — keep the existing quads
+    }
+    this.lastObstacles = obstacles;
+
     for (const child of this.obstacleGroup.children) {
       this.obstacleGroup.remove(child);
       (child as THREE.Mesh).geometry.dispose();
@@ -870,27 +1005,32 @@ export class WebGLRenderer {
     }
   }
 
+  // Audit 5a (Sprint 4): pooled selection markers — one shared RingGeometry +
+  // material (created in the constructor), meshes grown on demand and reused,
+  // hidden instead of disposed when deselected. The old version created +
+  // disposed geometry/material for every marker every frame.
   private updateSelectionMarkers(agents: any[], predators: any[], selectedUids: string[]) {
-    for (const m of this.selectionMarkers) {
-      this.scene.remove(m);
-      m.geometry.dispose();
-      (m.material as THREE.Material).dispose();
-    }
-    this.selectionMarkers = [];
+    const pool = this.selectionMarkers;
+    // Hide all pooled markers first; re-show only the currently selected ones.
+    for (const m of pool) m.visible = false;
     if (selectedUids.length === 0) return;
 
     const selected = new Map<string, [number, number]>();
     (agents || []).forEach((a: any) => { if (selectedUids.includes(a.uid)) selected.set(a.uid, a.pos); });
     (predators || []).forEach((p: any) => { if (selectedUids.includes(p.uid)) selected.set(p.uid, p.pos); });
 
-    const ringGeom = new THREE.RingGeometry(0.62, 0.72, 24);
-    const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, transparent: true, opacity: 0.9, depthTest: false });
+    let i = 0;
     selected.forEach((pos) => {
-      const ring = new THREE.Mesh(ringGeom, ringMat);
+      let ring = pool[i];
+      if (!ring) {
+        ring = new THREE.Mesh(this.selectionMarkerGeom, this.selectionMarkerMat);
+        ring.renderOrder = 999;
+        this.scene.add(ring);
+        pool.push(ring);
+      }
       ring.position.set(pos[0], pos[1], 0.6);
-      ring.renderOrder = 999;
-      this.scene.add(ring);
-      this.selectionMarkers.push(ring);
+      ring.visible = true;
+      i++;
     });
   }
 }

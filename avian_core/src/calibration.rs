@@ -260,6 +260,12 @@ pub const BOID_COHESION_WEIGHT: f64 = 0.5;
 pub const BOID_SEPARATION_RADIUS_M: f64 = 0.5;
 /// Local flock neighborhood radius (m).
 pub const BOID_NEIGHBOR_RADIUS_M: f64 = 3.0;
+/// Audit 5a (Sprint 2): cohesion weight multiplier for the `Spacer` (free-roam
+/// wander) state. `Spacer` previously kept the full 0.5 cohesion weight, so a
+/// wanderer was gravitationally bound to any cluster within the neighbor
+/// radius — permanent flocking. Scaling cohesion down lets a wanderer drift
+/// away from a group while still returning when it wants to.
+pub const BOID_SPACER_COHESION_MULTIPLIER: f64 = 0.2;
 
 /// Audit 4 §9.8: maximum Lévy "relocate" step (m) for the Wander spacer. The
 /// raw `levy_step` tail is heavy (P(step > s) ≈ s^-2), but the call sites cap
@@ -348,10 +354,38 @@ pub const PREDATOR_FILL_MEALS_TARGET: u32 = 3;
 /// Energy gained per grain consumed (2.4 uses this for the reward too).
 pub const GRAIN_ENERGY_KJ: f64 = 0.5;
 
+/// Audit 5a (Sprint 1): crop→gizzard digestion rate (grains per sim-second).
+/// The old code applied `(0.1 * dt) as u32`, which truncates to 0 at every
+/// realistic dt (dt = 1/120 → 0.00083) — digestion never ran, so the crop
+/// never emptied and hunger could only fall. Transfers now accumulate
+/// fractionally through `Metabolism::digest_carry_s`.
+pub const DIGESTION_RATE_GRANS_S: f64 = 0.1;
+/// Audit 5a (Sprint 1): gizzard→blood drain rate (grains per sim-second).
+/// The gizzard is a one-way buffer capped at `GIZZARD_CAPACITY_GRANS`; without
+/// a drain, it filled to the cap and blocked the crop→gizzard transfer forever
+/// (a second deadlock on top of the truncation bug). Draining at the same rate
+/// keeps the pipeline flowing and lets blood glucose fall so hunger rises.
+pub const GIZZARD_DRAIN_RATE_GRANS_S: f64 = 0.1;
+/// Audit 5a (Sprint 1): gizzard grinding-chamber capacity (grains). Matches the
+/// historical hard-coded `10` in `metabolism_system`.
+pub const GIZZARD_CAPACITY_GRANS: u32 = 10;
+
 /// World dimensions (m) — used to normalize `pos` in obs_v1 (3.1). Currently
 /// fixed by the wall layout in `Simulation::new`; becomes scenario config (5.2).
 pub const WORLD_WIDTH_M: f64 = 32.0;
 pub const WORLD_HEIGHT_M: f64 = 21.0;
+
+/// Audit 5a (Sprint 3): boundary-avoidance margin (m). When an agent is within
+/// this distance of an arena edge, a soft repulsion is added to its velocity
+/// pointing back toward the interior, scaled by how close it is. This kills the
+/// "edge-clinging straight line" artifact (CRW/Levy wanderers holding a heading
+/// into a wall and sliding along it) without being a hard wall.
+pub const WALL_AVOID_MARGIN_M: f64 = 2.0;
+/// Audit 5a (Sprint 3): strength of the boundary repulsion (m/s at the wall,
+/// scaled linearly to 0 at the margin). At the wall this equals a pigeon's
+/// ~WALK_SPEED_MS, so it reliably turns a wanderer back before it can slide;
+/// combined with the Sprint-2 velocity clamp it can never overspeed.
+pub const WALL_AVOID_STRENGTH: f64 = 1.0;
 
 /// obs_v1 (3.1) field counts.
 pub const OBS_NEIGHBOR_COUNT: usize = 7;

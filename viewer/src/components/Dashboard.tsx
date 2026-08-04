@@ -110,7 +110,10 @@ const AgentMiniCard: React.FC<{ a: AgentData; selected: boolean; onSelectUid?: (
   );
 };
 
-export const Dashboard: React.FC<DashboardProps> = ({ agents, selectedUids, lightLevel, deadCount, predatorCount, predators = [], metrics, onSelectUid }) => {
+// Audit 5a (Sprint 4): memoize the Dashboard. Combined with the throttled
+// ~4 Hz `ui` snapshot, the per-pigeon card grid only re-renders when agents/
+// predators/metrics actually change, instead of at the 62.5 Hz snapshot rate.
+export const Dashboard: React.FC<DashboardProps> = React.memo(({ agents, selectedUids, lightLevel, deadCount, predatorCount, predators = [], metrics, onSelectUid }) => {
   const displayedAgents = selectedUids.length > 0 ? agents.filter(a => selectedUids.includes(a.uid)) : agents;
 
   return (
@@ -171,4 +174,4 @@ export const Dashboard: React.FC<DashboardProps> = ({ agents, selectedUids, ligh
       </div>
     </div>
   );
-};
+});

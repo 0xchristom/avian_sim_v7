@@ -563,20 +563,31 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
             forage_hunger_threshold: sim.config.foraging_threshold,
             // Phase 9 (Audit 3): building-thermal updraft zones for Gliding.
             thermals: &sim.thermals,
+            // Audit 5a (Sprint 3): arena size for boundary avoidance.
+            world_dims: Vector2::new(sim.config.world_width, sim.config.world_height),
         };
 
         let _ = tree.tick(&mut ctx);
 
         // 2.1 boids-as-force: sum steering onto the tree-selected velocity.
         // Suppressed while fleeing (a fleeing pigeon does not align with its
-        // flock), while preening (a preening pigeon stands still), and when the
+        // flock), while preening (a preening pigeon stands still), while
+        // roosting (a sleeping bird does not align/cohere), and when the
         // 5.2 scenario disables flocking (config.flocking_enabled).
         if sim.config.flocking_enabled
             && *ctx.fsm != FSMState::Fleeing
             && *ctx.fsm != FSMState::Preening
+            && *ctx.fsm != FSMState::Roosting
         {
+            // Audit 5a (Sprint 2): steer only from neighbors within the
+            // calibrated local radius. The neighbor CACHE may still be the
+            // 10 m vision-range k-nearest set (it also feeds LOS cone-casting),
+            // but the boids steering input must be radius-filtered — otherwise
+            // the cohesion field is >3× larger than documented and every bird
+            // within 10 m gets gravitationally captured.
             let boid_neighbors: Vec<(Vector2<f64>, Vector2<f64>, f64)> = neighbors_raw
                 .iter()
+                .filter(|(_, d)| *d <= calibration::BOID_NEIGHBOR_RADIUS_M)
                 .filter_map(|(e, d)| match (positions.get(e), velocities.get(e)) {
                     (Some(p), Some(v)) if *d > 1e-6 => Some((*p, *v, *d)),
                     _ => None,
@@ -595,10 +606,50 @@ pub fn run_systems(sim: &mut Simulation, dt: f64, exporter: &mut TelemetryExport
             ctx.vel.0 += steer;
         }
 
+        // Audit 5a (Sprint 3): boundary-avoidance steering. A CRW/Lévy wanderer
+        // holds its heading until the step burns out; against a wall the physics
+        // yields tangential wall-sliding, so it used to cling to the edge in a
+        // straight line forever. This soft repulsion pushes back toward the
+        // interior, scaled by proximity (strongest AT the wall, zero outside the
+        // margin). Applied for every non-fleeing/non-gliding state — a bird can
+        // still touch an edge occasionally, but never keeps sliding along it.
+        if *ctx.fsm != FSMState::Fleeing && *ctx.fsm != FSMState::Gliding {
+            let margin = calibration::WALL_AVOID_MARGIN_M;
+            let mut repel = Vector2::zeros();
+            let x = ctx.pos.0.x;
+            let y = ctx.pos.0.y;
+            let (w, h) = (ctx.world_dims.x, ctx.world_dims.y);
+            if x < margin {
+                repel.x += (1.0 - x / margin).min(1.0);
+            } else if x > w - margin {
+                repel.x -= (1.0 - (w - x) / margin).min(1.0);
+            }
+            if y < margin {
+                repel.y += (1.0 - y / margin).min(1.0);
+            } else if y > h - margin {
+                repel.y -= (1.0 - (h - y) / margin).min(1.0);
+            }
+            ctx.vel.0 += repel * calibration::WALL_AVOID_STRENGTH;
+        }
+
         // 2.7: sick agents move at SICK_SPEED_MULTIPLIER (incl. fleeing → more
         // vulnerable to predators).
         if ctx.sick {
             ctx.vel.0 *= calibration::SICK_SPEED_MULTIPLIER;
+        }
+
+        // Audit 5a (Sprint 2): clamp the ground speed to the pigeon's own
+        // max_speed_ms. Boids steering is a FORCE and was never clamped, so
+        // cohesion at 5 m injected ~2.5 m/s onto a wanderer whose own walk speed
+        // is 0.96 m/s — steering routinely exceeded max_speed_ms and kept birds
+        // glued to the flock. Fleeing and Gliding are airborne (the tree sets
+        // FLY_SPEED_MS / GLIDE_SPEED_MS above max_speed_ms) and are exempt; the
+        // sick multiplier above already reduced us.
+        if *ctx.fsm != FSMState::Fleeing && *ctx.fsm != FSMState::Gliding {
+            let speed = ctx.vel.0.norm();
+            if speed > ctx.mobility.max_speed_ms {
+                ctx.vel.0 = ctx.vel.0 / speed * ctx.mobility.max_speed_ms;
+            }
         }
 
         let mut head_bob_system = HeadBobSystem {

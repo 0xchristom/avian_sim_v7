@@ -9,7 +9,11 @@ const App: React.FC = () => {
   const rendererRef = useRef<WebGLRenderer | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const [activeTool, setActiveTool] = useState('seed');
-  const snapshot = useSimulationStore((state) => state.snapshot);
+  // Audit 5a (Sprint 4): the React tree subscribes to the THROTTLED ~4 Hz `ui`
+  // snapshot instead of the raw 62.5 Hz `snapshot`. The rAF render loop reads
+  // the live snapshot via useSimulationStore.getState() (below), so React work
+  // is decoupled from the snapshot rate entirely.
+  const ui = useSimulationStore((state) => state.ui);
   const setSnapshot = useSimulationStore((state) => state.setSnapshot);
   const appendEvents = useSimulationStore((state) => state.appendEvents);
   const setMetrics = useSimulationStore((state) => state.setMetrics);
@@ -171,16 +175,19 @@ const App: React.FC = () => {
   };
 
   const selectInRect = (x0: number, y0: number, x1: number, y1: number) => {
-    if (!snapshot) return;
+    // Audit 5a (Sprint 4): hit-test against the LIVE snapshot (interaction
+    // must be accurate even between the throttled React re-renders).
+    const live = useSimulationStore.getState().snapshot;
+    if (!live) return;
     const minX = Math.min(x0, x1), maxX = Math.max(x0, x1);
     const minY = Math.min(y0, y1), maxY = Math.max(y0, y1);
     const hits: string[] = [];
-    snapshot.agents.forEach(a => {
+    live.agents.forEach(a => {
       if (a.pos[0] >= minX && a.pos[0] <= maxX && a.pos[1] >= minY && a.pos[1] <= maxY) {
         hits.push(a.uid);
       }
     });
-    (snapshot.predators || []).forEach(p => {
+    (live.predators || []).forEach(p => {
       if (p.pos[0] >= minX && p.pos[0] <= maxX && p.pos[1] >= minY && p.pos[1] <= maxY) {
         hits.push(p.uid);
       }
@@ -218,14 +225,15 @@ const App: React.FC = () => {
     }
     // 6.1: per-agent info on hover — nearest agent/predator within ~0.8 m.
     const { x, y } = toSim(e.clientX, e.clientY);
+    const live = useSimulationStore.getState().snapshot;
     // Holder object: TS does not narrow a plain `let` mutated inside a closure.
     const pick: { closest: { uid: string; dist: number } | null } = { closest: null };
     const consider = (uid: string, px: number, py: number) => {
       const dist = Math.sqrt((px - x) ** 2 + (py - y) ** 2);
       if (dist < 0.8 && (!pick.closest || dist < pick.closest.dist)) pick.closest = { uid, dist };
     };
-    snapshot?.agents.forEach(a => consider(a.uid, a.pos[0], a.pos[1]));
-    (snapshot?.predators || []).forEach(p => consider(p.uid, p.pos[0], p.pos[1]));
+    live?.agents.forEach(a => consider(a.uid, a.pos[0], a.pos[1]));
+    (live?.predators || []).forEach(p => consider(p.uid, p.pos[0], p.pos[1]));
     setHoveredUid(pick.closest ? pick.closest.uid : null);
     setHoverPos(pick.closest ? { x: e.clientX, y: e.clientY } : null);
   };
@@ -262,6 +270,7 @@ const App: React.FC = () => {
     // A sub-3px drag is a plain click: single-point hit-test (agents + predators).
     if (Math.abs(dx) < 3 && Math.abs(dy) < 3) {
       const { x, y } = toSim(e.clientX, e.clientY);
+      const live = useSimulationStore.getState().snapshot;
       // Holder object: TS does not narrow `closest` across the closure below.
       const pick: { closest: { uid: string; dist: number } | null } = { closest: null };
       const hit = (uid: string, px: number, py: number) => {
@@ -270,8 +279,8 @@ const App: React.FC = () => {
           pick.closest = { uid, dist };
         }
       };
-      snapshot?.agents.forEach(a => hit(a.uid, a.pos[0], a.pos[1]));
-      (snapshot?.predators || []).forEach(p => hit(p.uid, p.pos[0], p.pos[1]));
+      live?.agents.forEach(a => hit(a.uid, a.pos[0], a.pos[1]));
+      (live?.predators || []).forEach(p => hit(p.uid, p.pos[0], p.pos[1]));
       setSelectedUids(pick.closest ? [pick.closest.uid] : []);
       return;
     }
@@ -308,8 +317,8 @@ const App: React.FC = () => {
   } : null;
 
   // 6.1: hovered entity for the tooltip (agent or predator).
-  const hoveredAgent = hoveredUid ? snapshot?.agents.find(a => a.uid === hoveredUid) : null;
-  const hoveredPredator = hoveredUid ? snapshot?.predators.find(p => p.uid === hoveredUid) : null;
+  const hoveredAgent = hoveredUid ? ui?.agents.find(a => a.uid === hoveredUid) : null;
+  const hoveredPredator = hoveredUid ? ui?.predators.find(p => p.uid === hoveredUid) : null;
   const tooltipRect = hoverPos && wrapperRect ? {
     left: hoverPos.x - wrapperRect.left + 14,
     top: hoverPos.y - wrapperRect.top + 14,
@@ -347,10 +356,10 @@ const App: React.FC = () => {
             <span style={{ color: connected ? '#00ffcc' : '#ff3366' }}>{connected ? '● CONNECTED' : '○ DISCONNECTED'}</span>
             <span>{paintFps} fps paint</span>
             <span>{recvFps} recv/s</span>
-            <span>#{snapshot?.frame ?? 0}</span>
-            <span>{snapshot ? formatTime(snapshot.time_us) : "00:00"}</span>
-            <span>{snapshot?.agents.length ?? 0} birds</span>
-            <span>{snapshot?.grains.length ?? 0} grains</span>
+            <span>#{ui?.frame ?? 0}</span>
+            <span>{ui ? formatTime(ui.time_us) : "00:00"}</span>
+            <span>{ui?.agents.length ?? 0} birds</span>
+            <span>{ui?.grains.length ?? 0} grains</span>
           </div>
         </div>
         
@@ -401,7 +410,7 @@ const App: React.FC = () => {
         </div>
 
         <div style={{ padding: '12px', flex: 1 }}>
-          <Dashboard agents={snapshot?.agents || []} selectedUids={selectedUids} lightLevel={snapshot?.light_level} deadCount={snapshot?.dead_count} predatorCount={snapshot?.predators?.length} predators={snapshot?.predators || []} metrics={metrics} onSelectUid={(uid) => setSelectedUids([uid])} />
+          <Dashboard agents={ui?.agents || []} selectedUids={selectedUids} lightLevel={ui?.light_level} deadCount={ui?.dead_count} predatorCount={ui?.predators?.length} predators={ui?.predators || []} metrics={metrics} onSelectUid={(uid) => setSelectedUids([uid])} />
         </div>
 
         {/* 6.1: event log panel — last injected scenario events. */}
@@ -481,7 +490,7 @@ const App: React.FC = () => {
               )}
             </div>
           )}
-          {!snapshot && (
+          {!ui && (
             <div style={{
               position: 'absolute',
               inset: 0,

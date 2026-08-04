@@ -268,14 +268,19 @@ fn fsm_time_budget_within_literature_bands() {
     // stable-age band; sick birds shuffle instead of foraging, dropping the
     // measured foraging budget to ~2.8%. The floor is loosened to 2% with the
     // intent (agents actually forage, never all-rest) unchanged.
+    // Audit 5a (Sprint 1): the crop→gizzard digestion pipeline now actually
+    // runs (see `tests/digestion.rs`), so a real hunger cycle drives foraging.
+    // With this seed the measured foraging share rises to ~17%. The floor is
+    // raised to 5% so a future regression to "digestion is dead / never hungry"
+    // fails loudly.
     assert!(
         (0.20..=0.90).contains(&resting),
         "resting time budget {:.1}% outside [20%, 90%]",
         resting * 100.0
     );
     assert!(
-        (0.02..=0.60).contains(&foraging),
-        "foraging time budget {:.1}% outside [2%, 60%]",
+        (0.05..=0.60).contains(&foraging),
+        "foraging time budget {:.1}% outside [5%, 60%]",
         foraging * 100.0
     );
     assert!(
